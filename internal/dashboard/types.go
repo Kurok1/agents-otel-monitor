@@ -200,10 +200,10 @@ type SessionTokenDetail struct {
 
 // RatesResponse → GET /api/usage/rates?range=&client=
 //
-// Sliding-window rate metrics (spec 2026-07-09): speed = output tokens per
-// request-second (weighted average), throughput = tokens per wall-clock
-// minute split by token type. Buckets: day → 48×1h, week → 28×6h,
-// month → 30×1d; the last bucket is partial (normalized by elapsed time).
+// Sliding-window rate metrics (spec 2026-07-09). Claude speed is output
+// tokens per request-second; Codex speed is 1000 / mean service TBT(ms).
+// Throughput is tokens per wall-clock minute split by token type. Buckets:
+// day → 48×1h, week → 28×6h, month → 30×1d.
 type RatesResponse struct {
 	Range          string          `json:"range"`
 	BucketInterval string          `json:"bucket_interval"` // "1h" / "6h" / "1d"
@@ -211,10 +211,10 @@ type RatesResponse struct {
 	Throughput     ThroughputBlock `json:"throughput"`
 }
 
-// SpeedBlock: Groups is the legend order (window output tokens descending).
+// SpeedBlock: Groups is the legend order (window source-weight descending).
 // A group absent from a bucket's Values means "no data" (frontend breaks the
-// line). Current/Previous are whole-window weighted averages; nil when the
-// window has no usable requests.
+// line). Current/Previous are whole-window source-native averages; nil when
+// the window has no data or the request is an all-client view.
 type SpeedBlock struct {
 	Groups   []string     `json:"groups"`
 	Points   []RatesPoint `json:"points"`

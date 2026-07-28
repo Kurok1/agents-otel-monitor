@@ -28,6 +28,24 @@ type CodexCommonAttrs struct {
 	Attrs          map[string]any // leftover, serialized into the attrs JSON column
 }
 
+type CodexMetricSkillInjectedRow struct {
+	CodexCommonAttrs
+	StartTimestamp time.Time
+	Value          int64
+	Skill          sql.NullString
+	Status         sql.NullString
+	InvokeType     sql.NullString
+	SessionSource  sql.NullString
+}
+
+type CodexMetricResponseTBTRow struct {
+	CodexCommonAttrs
+	StartTimestamp time.Time
+	SampleCount    int64
+	SumMs          float64
+	SessionSource  sql.NullString
+}
+
 type CodexEventConversationStartsRow struct {
 	CodexCommonAttrs
 	ProviderName          sql.NullString

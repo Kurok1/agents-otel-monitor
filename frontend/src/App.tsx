@@ -521,7 +521,15 @@ export default function App() {
         <div className="section-head">
           <div>
             <h2>生产速率</h2>
-            <p>{RATES_WINDOW_LABEL[range]} · 生成速度按请求耗时加权 · 吞吐率按墙钟时间归一</p>
+            <p>
+              {RATES_WINDOW_LABEL[range]} ·{' '}
+              {client === 'codex'
+                ? '生成速度按 Codex 原生 TBT 换算'
+                : client === 'claude'
+                  ? '生成速度按请求耗时加权'
+                  : 'Claude 按请求耗时 · Codex 按原生 TBT'}{' '}
+              · 吞吐率按墙钟时间归一
+            </p>
           </div>
         </div>
 
@@ -530,7 +538,13 @@ export default function App() {
             <div className="card-head">
               <div>
                 <h3>生成速度</h3>
-                <div className="card-sub">output tokens / 请求耗时 · 按模型分组</div>
+                <div className="card-sub">
+                  {client === 'codex'
+                    ? '1000 / 平均 TBT · 按模型分组'
+                    : client === 'claude'
+                      ? 'output tokens / 请求耗时 · 按模型分组'
+                      : '按客户端原生口径 · 按模型分组'}
+                </div>
               </div>
               <div style={{ textAlign: 'right' }}>
                 <div className="kpi__value" style={{ fontSize: 22 }}>
@@ -553,7 +567,13 @@ export default function App() {
               ))}
             </div>
             <LineChart points={data.rates.speed.points} series={speedSeries} height={240} />
-            <div className="card-sub">注：耗时含首 token 等待，数值略低于纯解码速度；失败请求不计入。</div>
+            <div className="card-sub">
+              {client === 'codex'
+                ? '注：TBT 是相邻生成 token 的平均间隔；数值越高表示纯解码越快。'
+                : client === 'claude'
+                  ? '注：耗时含首 token 等待，数值略低于纯解码速度；失败请求不计入。'
+                  : '注：两家速度口径不同，混合视图不合并顶部 KPI；切换客户端可查看单一口径。'}
+            </div>
           </section>
 
           <section className="card">
@@ -579,13 +599,16 @@ export default function App() {
           </section>
         </div>
 
-        {client !== 'codex' && (
-        <>
         <div className="section-head">
           <div>
             <h2>累计排名</h2>
             <p>
-              {since === 'all' ? '所有时间' : `近 ${since === '7d' ? '7 天' : '30 天'}`} · 跨项目汇总 · 仅统计 Claude Code
+              {since === 'all' ? '所有时间' : `近 ${since === '7d' ? '7 天' : '30 天'}`} · 跨项目汇总 ·{' '}
+              {client === 'codex'
+                ? '仅统计 Codex'
+                : client === 'claude'
+                  ? '仅统计 Claude Code'
+                  : 'Claude Code + Codex'}
             </p>
           </div>
           <div className="range-toggle" role="tablist" aria-label="排名时段">
@@ -663,8 +686,6 @@ export default function App() {
             </div>
           </section>
         </div>
-        </>
-        )}
 
         <section className="card">
           <div className="card-head">

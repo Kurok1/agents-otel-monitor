@@ -1,8 +1,10 @@
 package otlp
 
 import (
+	"encoding/base64"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,9 @@ import (
 
 	logspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	metricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	mpb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -106,6 +111,124 @@ func TestDispatchAllCaptured(t *testing.T) {
 func mergeMap(dst, src map[string]int) {
 	for k, v := range src {
 		dst[k] += v
+	}
+}
+
+func TestDispatchCodexMetricsGolden(t *testing.T) {
+	// Privacy-scrubbed, then re-marshaled from an isolated Codex 0.145.0
+	// capture. Base64 keeps the protobuf fixture reviewable in text patches.
+	encoded, err := os.ReadFile("testdata/codex_0_145_skill_tbt.pb.b64")
+	if err != nil {
+		t.Fatalf("read golden fixture: %v", err)
+	}
+	wire, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
+	if err != nil {
+		t.Fatalf("decode golden fixture: %v", err)
+	}
+	var request metricspb.ExportMetricsServiceRequest
+	if err := proto.Unmarshal(wire, &request); err != nil {
+		t.Fatalf("unmarshal golden fixture: %v", err)
+	}
+
+	sink := &NoopSink{}
+	summary := NewDispatcher(quietLogger(), sink, nil).DispatchMetrics(&request)
+	if summary.Errors != 0 {
+		t.Fatalf("errors = %d, want 0", summary.Errors)
+	}
+	if summary.MetricRows[codexSkillInjectedMetricName] != 1 {
+		t.Fatalf("skill rows = %d, want 1", summary.MetricRows[codexSkillInjectedMetricName])
+	}
+	if summary.MetricRows[codexServiceTBTMetricName] != 1 {
+		t.Fatalf("TBT rows = %d, want 1", summary.MetricRows[codexServiceTBTMetricName])
+	}
+
+	var skillFound, tbtFound bool
+	for _, metric := range sink.Metrics {
+		switch row := metric.(type) {
+		case CodexMetricSkillInjectedRow:
+			skillFound = row.Value == 1 && row.Skill.String == "golang-patterns" &&
+				row.Status.String == "ok" && row.Model.String == "gpt-5.6-sol"
+		case CodexMetricResponseTBTRow:
+			tbtFound = row.SampleCount == 1 && row.SumMs > 12.10 && row.SumMs < 12.12 &&
+				row.Model.String == "gpt-5.6-sol"
+		}
+	}
+	if !skillFound || !tbtFound {
+		t.Fatalf("golden rows = %+v, want captured Skill and TBT values", sink.Metrics)
+	}
+}
+
+func TestDispatchCodexSkillRejectsCumulativeSum(t *testing.T) {
+	request := &metricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*mpb.ResourceMetrics{{
+			Resource: &resourcepb.Resource{},
+			ScopeMetrics: []*mpb.ScopeMetrics{{
+				Metrics: []*mpb.Metric{{
+					Name: "codex.skill.injected",
+					Data: &mpb.Metric_Sum{Sum: &mpb.Sum{
+						AggregationTemporality: mpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+						IsMonotonic:            true,
+						DataPoints: []*mpb.NumberDataPoint{{
+							Value: &mpb.NumberDataPoint_AsInt{AsInt: 1},
+							Attributes: []*commonpb.KeyValue{
+								{Key: "skill", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "golang-patterns"}}},
+								{Key: "status", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "ok"}}},
+							},
+						}},
+					}},
+				}},
+			}},
+		}},
+	}
+	sink := &NoopSink{}
+	summary := NewDispatcher(quietLogger(), sink, nil).DispatchMetrics(request)
+
+	if summary.Errors != 1 {
+		t.Fatalf("errors = %d, want 1", summary.Errors)
+	}
+	if len(sink.Metrics) != 0 {
+		t.Fatalf("persisted %d rows, want 0", len(sink.Metrics))
+	}
+}
+
+func TestDispatchCodexTBTRejectsNonFiniteSum(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sum  float64
+	}{
+		{name: "NaN", sum: math.NaN()},
+		{name: "positive infinity", sum: math.Inf(1)},
+		{name: "negative infinity", sum: math.Inf(-1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sum := tc.sum
+			request := &metricspb.ExportMetricsServiceRequest{
+				ResourceMetrics: []*mpb.ResourceMetrics{{
+					Resource: &resourcepb.Resource{},
+					ScopeMetrics: []*mpb.ScopeMetrics{{
+						Metrics: []*mpb.Metric{{
+							Name: codexServiceTBTMetricName,
+							Data: &mpb.Metric_Histogram{Histogram: &mpb.Histogram{
+								AggregationTemporality: mpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
+								DataPoints: []*mpb.HistogramDataPoint{{
+									Count: 1,
+									Sum:   &sum,
+								}},
+							}},
+						}},
+					}},
+				}},
+			}
+			sink := &NoopSink{}
+			summary := NewDispatcher(quietLogger(), sink, nil).DispatchMetrics(request)
+
+			if summary.Errors != 1 {
+				t.Fatalf("errors = %d, want 1", summary.Errors)
+			}
+			if len(sink.Metrics) != 0 {
+				t.Fatalf("persisted %d rows, want 0", len(sink.Metrics))
+			}
+		})
 	}
 }
 

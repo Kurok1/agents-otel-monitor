@@ -1,9 +1,9 @@
 # DuckDB 数据模型
 
-每个指标 / 事件单独建一张窄表，共 **25 张表**：
+每个指标 / 事件单独建一张窄表，共 **27 张表**：
 
 - Claude Code：8 张 metric 表（前缀 `metric_`）+ 11 张 event 表（前缀 `event_`）
-- Codex CLI：6 张 event 表（前缀 `codex_event_`），见 §7
+- Codex CLI：2 张 metric 表（前缀 `codex_metric_`）+ 6 张 event 表（前缀 `codex_event_`），见 §7
 
 设计原则：
 1. **一指标 / 一事件 = 一张表**，避免大宽表 schema 漂移
@@ -621,9 +621,9 @@ DuckDB 单文件长期增长后查询性能下降。建议：
 
 ---
 
-## 7. Codex 事件表（6 张）
+## 7. Codex 表（8 张）
 
-来自 OpenAI Codex CLI 的 OTEL Logs（协议见 [`protocol.md`](./protocol.md) §7），DDL 在 `internal/store/migrations/003_codex_event_tables.sql`。
+来自 OpenAI Codex CLI 的 OTEL Logs 与选定 Metrics（协议见 [`protocol.md`](./protocol.md) §7），DDL 在 `internal/store/migrations/003_codex_event_tables.sql`、`005_codex_skill_metrics.sql`、`006_codex_response_tbt_metric.sql`。
 
 ### 7.1 公共列（codex 表族）
 
@@ -644,7 +644,18 @@ DuckDB 单文件长期增长后查询性能下降。建议：
 
 **与 Claude 表族的关键差异**：无 `user_id NOT NULL` 约束（Codex 身份字段天然可空），统一身份在查询层做 `COALESCE(user_account_id, user_email, 'unknown')`。
 
-### 7.2 各表特有列
+Metric 表额外包含 `start_ts`；Codex Metrics 当前不保证携带 `conversation.id`，因此会话级 Skill / 速度不做推断关联。
+
+### 7.2 Metric 表
+
+| 表 | 专有列 |
+|---|---|
+| `codex_metric_skill_injected` | `start_ts`、`value` BIGINT、`skill`、`status`、`invoke_type`、`session_source` |
+| `codex_metric_response_tbt` | `start_ts`、`sample_count` BIGINT、`sum_ms` DOUBLE、`session_source` |
+
+TBT 表不保存 Histogram 的 explicit bounds / bucket counts。一个 OTLP HistogramDataPoint 恒落一行，查询只按时间与模型聚合 `SUM(sample_count)` / `SUM(sum_ms)`，避免按 token 或 bucket 放大存储量。
+
+### 7.3 Event 表特有列
 
 | 表 | 特有列 |
 |---|---|
@@ -655,8 +666,10 @@ DuckDB 单文件长期增长后查询性能下降。建议：
 | `codex_event_tool_decision` | `tool_name`、`call_id`、`decision`（Codex 原始枚举）、`source` |
 | `codex_event_tool_result` | `tool_name`、`call_id`、`duration_ms` BIGINT、`success` BOOLEAN、`mcp_server`、`mcp_server_origin`、`arguments_length` / `output_length` BIGINT |
 
-### 7.3 写入要点
+### 7.4 写入要点
 
+- `codex.skill.injected` 只接受 monotonic DELTA Sum；Dashboard 仅统计 `status=ok/success`
+- `codex.responses_api_engine_service_tbt.duration_ms` 只接受 DELTA Histogram；显式 bucket 在解析后丢弃
 - `codex.sse_event` 仅 `event.kind = response.completed` 写入 `codex_event_token_usage`，其余 kind 由 dispatcher 计入 skipped，不持久化
 - `codex_event_tool_result` 的 `arguments` / `output` 原文在解析层即丢弃（只算字节长度），**不落任何列也不落 `attrs`**——Codex 默认不脱敏且无客户端开关，这是接收端的隐私红线
 - token 统计口径为子集式（`cached ⊂ input`、`reasoning ⊂ output`），与 Claude 并列式不同：Codex 总量 = `input_token_count + output_token_count`，不可再加 cached

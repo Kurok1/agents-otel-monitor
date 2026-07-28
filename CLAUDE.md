@@ -8,9 +8,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `claude-code-monitor` 是一个 Go 实现的 AI 编码客户端监控服务：
 
-- **输入**：Claude Code（Metrics + Events）与 OpenAI Codex CLI（仅 Events）通过 **OTLP gRPC** 推送的遥测，共用 4317 端口
-- **存储**：DuckDB 单文件，**一指标 / 一事件 = 一张表**，共 **25 张表**（Claude 19 张 + Codex 6 张 `codex_event_*`）
-- **当前版本（v1）**：只做后端 ingest + 落库；查询 API 与前端放 v2
+- **输入**：Claude Code（Metrics + Events）与 OpenAI Codex CLI（Events + Dashboard 所需 Metrics）通过 **OTLP gRPC** 推送的遥测，共用 4317 端口
+- **存储**：DuckDB 单文件，**一指标 / 一事件 = 一张表**，共 **27 张表**（Claude 19 张 + Codex 2 张 `codex_metric_*` + 6 张 `codex_event_*`）
+- **当前版本**：后端 ingest、查询 API 与 Web Dashboard 均已落地
 
 ---
 
@@ -20,8 +20,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | 文档 | 内容 |
 |---|---|
-| `docs/protocol.md` | 19 个指标 / 事件的 OTLP 数据结构、字段约束、取值范围 |
-| `docs/models.md` | 19 张 DuckDB 表的完整 DDL + 公共列约定 + 写入要点 |
+| `docs/protocol.md` | Claude / Codex 指标与事件的 OTLP 数据结构、字段约束、取值范围 |
+| `docs/models.md` | 27 张 DuckDB 表的完整 DDL + 公共列约定 + 写入要点 |
 
 ---
 
@@ -30,7 +30,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 数据流（**理解此图等于理解整个系统**）：
 
 ```
-Claude Code (gRPC client, OTLP/protobuf)
+Claude Code / Codex (gRPC client, OTLP/protobuf)
         │  :4317
         ▼
 [MetricsServiceServer]  [LogsServiceServer]    ← internal/otlp/*_service.go
@@ -45,7 +45,7 @@ Claude Code (gRPC client, OTLP/protobuf)
         ┌───────────┴───────────┐
         ▼                       ▼
   parseXxx()                parseYyy()         ← internal/otlp/{metrics,events,codex_events}.go
-   → XxxRow                 → YyyRow            （25 个强类型 row struct）
+   → XxxRow                 → YyyRow            （27 个强类型 row struct）
         │                       │
         └───────────┬───────────┘
                     ▼
@@ -54,7 +54,7 @@ Claude Code (gRPC client, OTLP/protobuf)
                     ▼
             [BufferedWriter]                    ← internal/store/writer.go
                     │
-       tableNameFor(row) → 19 个 TableBuffer
+       tableNameFor(row) → 27 个 TableBuffer
                     │
        触发：batch_size 行 或 flush_interval
                     ▼
@@ -120,9 +120,9 @@ export OTEL_LOGS_EXPORT_INTERVAL=5000
 ### 类型纪律
 
 - **避免 `any` / `interface{}`**：仅以下两处允许使用：
-  - 19 张表的 `attrs` 兜底列（`map[string]any`），用于未识别的 OTLP attribute
+  - 27 张表的 `attrs` 兜底列（`map[string]any`），用于未识别的 OTLP attribute
   - `Sink.AppendMetric(row any)` / `AppendEvent(row any)`：内部立刻 type-switch 到具体 row struct
-- **每张表对应一个 row struct**（共 19 个），字段名与列名一一对应；不用 `map[string]string` 代替
+- **每张表对应一个 row struct**（共 27 个），字段名与列名一一对应；不用 `map[string]string` 代替
 - **可空字段用 `sql.NullXxx`**，直接喂给 go-duckdb Appender，避免双层零值检查
 - 时间统一 `time.Time`（UTC），OTLP 纳秒值除 1000 转微秒精度
 
@@ -186,7 +186,7 @@ internal/stats/                # 自监控端点
 
 ### 测试
 
-- **golden testdata 用真实 protobuf**：原样放进 `testdata/`，不要手写 OTLP 消息
+- **golden testdata 用真实 protobuf**：从隔离采集取样；含敏感 attribute 时先脱敏并重新 marshal，可用 `.pb.b64` 做二进制安全存放，不要手写 OTLP 消息
 - **每个 parser 至少一个 golden case**；典型分支（accept/reject、success/error）各一例
 - **`go test -race` 默认开启**：buffer 的并发路径必须无竞争
 - 不写无意义的 mock 框架，简单 `countingSink` / `fakeAppender` 足够
@@ -244,7 +244,7 @@ for _, row := range rows {
 |---|---|
 | 仅支持 gRPC，不支持 HTTP/protobuf | gRPC 已覆盖默认场景，stub 直接给 Export 签名，实现更简洁 |
 | YAML 单一配置源，不引入 koanf / viper | 单一来源够用，`yaml.v3` 直接 Unmarshal 即可 |
-| 一指标/事件一表（19 张窄表） | 避免大宽表 schema 漂移，详见 `docs/models.md` §1 |
+| 一指标/事件一表（27 张窄表） | 避免大宽表 schema 漂移，详见 `docs/models.md` §1 |
 | 未识别字段进 `attrs JSON` 兜底 | Claude Code 升级新增 attribute 时无需迁移 |
 | Query API 推迟到 v2 | 没有前端需求时定义 API 容易过度设计 |
 | `TIMESTAMP` 微秒精度而非 `TIMESTAMP_NS` | 兼容外部 BI 工具；详见 `docs/models.md` §5.1 |
@@ -252,5 +252,5 @@ for _, row := range rows {
 | 背压策略：丢最旧 + 日志，不反压客户端 | OTLP SDK 自身就会丢，监控不能阻塞客户端 |
 | Codex 用平行 `codex_event_*` 表，不归一进 Claude 表 | 两家协议独立演进互不干扰；统一用量视图放查询层（见 spec 2026-07-01） |
 | Codex `tool_result` 原文只存长度 | Codex 默认不脱敏且无客户端开关，敏感内容不落盘 |
-| Codex 仅接 Logs 的 6 个核心用量事件 | metrics 是 histogram（管线不支持）；sandbox / network_proxy 等事件 v1 无需求 |
+| Codex 接 6 个核心 Logs 事件及 Dashboard 所需的 Skill / service TBT Metrics | Skill 用 monotonic DELTA Sum；TBT 用 DELTA Histogram 且只保存 count/sum，不展开 bucket；其余高容量 metrics 与 sandbox / network_proxy 等事件无 Dashboard 需求 |
 | Codex/第三方成本由 `internal/pricing` 在 ingest 时按 LiteLLM 计价表**估算** `cost_usd`（v2.4.0，反转早期「不估算」非目标）；Claude 仍用自报权威成本 | Codex 不上报 cost；用外部计价表估算填补，默认关闭零影响，单价写入时冻结不回填（见 spec/plan 2026-07-02-third-party-cost-estimation） |

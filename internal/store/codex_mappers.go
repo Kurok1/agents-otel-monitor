@@ -13,12 +13,8 @@ import (
 	"github.com/kuroky/claude-code-monitor/internal/otlp"
 )
 
-// commonCodexEventCols emits the 11-column prefix shared by every codex event
-// table. Column order matches internal/store/migrations/003_codex_event_tables.sql.
-func commonCodexEventCols(c otlp.CodexCommonAttrs) []driver.Value {
+func codexCommonAttrCols(c otlp.CodexCommonAttrs) []driver.Value {
 	return []driver.Value{
-		c.Timestamp,
-		time.Now().UTC(),
 		nullStr(c.ConversationID),
 		nullStr(c.AppVersion),
 		nullStr(c.AuthMode),
@@ -29,6 +25,59 @@ func commonCodexEventCols(c otlp.CodexCommonAttrs) []driver.Value {
 		nullStr(c.UserAccountID),
 		nullStr(c.UserEmail),
 	}
+}
+
+// commonCodexEventCols emits the 11-column prefix shared by every codex event
+// table. Column order matches internal/store/migrations/003_codex_event_tables.sql.
+func commonCodexEventCols(c otlp.CodexCommonAttrs) []driver.Value {
+	args := []driver.Value{
+		c.Timestamp,
+		time.Now().UTC(),
+	}
+	return append(args, codexCommonAttrCols(c)...)
+}
+
+// commonCodexMetricCols emits the time prefix, metric payload, and common
+// Codex attributes in the order used by each codex_metric_* migration.
+func commonCodexMetricCols(c otlp.CodexCommonAttrs, startTs time.Time, payload ...driver.Value) []driver.Value {
+	args := []driver.Value{c.Timestamp, startTs, time.Now().UTC()}
+	args = append(args, payload...)
+	return append(args, codexCommonAttrCols(c)...)
+}
+
+func mapCodexSkillInjected(row any) ([]driver.Value, error) {
+	r, ok := row.(otlp.CodexMetricSkillInjectedRow)
+	if !ok {
+		return nil, fmt.Errorf("expected CodexMetricSkillInjectedRow, got %T", row)
+	}
+	attrs, err := attrsValue(r.Attrs)
+	if err != nil {
+		return nil, err
+	}
+	args := commonCodexMetricCols(r.CodexCommonAttrs, r.StartTimestamp, r.Value)
+	return append(args,
+		nullStr(r.Skill),
+		nullStr(r.Status),
+		nullStr(r.InvokeType),
+		nullStr(r.SessionSource),
+		attrs,
+	), nil
+}
+
+func mapCodexResponseTBT(row any) ([]driver.Value, error) {
+	r, ok := row.(otlp.CodexMetricResponseTBTRow)
+	if !ok {
+		return nil, fmt.Errorf("expected CodexMetricResponseTBTRow, got %T", row)
+	}
+	attrs, err := attrsValue(r.Attrs)
+	if err != nil {
+		return nil, err
+	}
+	args := commonCodexMetricCols(r.CodexCommonAttrs, r.StartTimestamp, r.SampleCount, r.SumMs)
+	return append(args,
+		nullStr(r.SessionSource),
+		attrs,
+	), nil
 }
 
 func mapCodexConversationStarts(row any) ([]driver.Value, error) {

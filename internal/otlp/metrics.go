@@ -2,6 +2,7 @@ package otlp
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
@@ -34,6 +35,54 @@ func numberDataPointAsDouble(dp *mpb.NumberDataPoint) (float64, bool) {
 func dataPointTimestamps(dp *mpb.NumberDataPoint) (time.Time, time.Time) {
 	return time.Unix(0, int64(dp.TimeUnixNano)).UTC(),
 		time.Unix(0, int64(dp.StartTimeUnixNano)).UTC()
+}
+
+func histogramDataPointTimestamps(dp *mpb.HistogramDataPoint) (time.Time, time.Time) {
+	return time.Unix(0, int64(dp.TimeUnixNano)).UTC(),
+		time.Unix(0, int64(dp.StartTimeUnixNano)).UTC()
+}
+
+func parseCodexResponseTBT(dp *mpb.HistogramDataPoint, resourceAttrs []*commonpb.KeyValue) (CodexMetricResponseTBTRow, error) {
+	if dp.Sum == nil {
+		return CodexMetricResponseTBTRow{}, fmt.Errorf("codex response tbt: missing sum")
+	}
+	if math.IsNaN(*dp.Sum) || math.IsInf(*dp.Sum, 0) {
+		return CodexMetricResponseTBTRow{}, fmt.Errorf("codex response tbt: sum is not finite")
+	}
+	if dp.Count > uint64(1<<63-1) {
+		return CodexMetricResponseTBTRow{}, fmt.Errorf("codex response tbt: count overflows int64")
+	}
+	m := newAttrMap(resourceAttrs, dp.Attributes)
+	ts, startTs := histogramDataPointTimestamps(dp)
+	row := CodexMetricResponseTBTRow{
+		CodexCommonAttrs: extractCodexCommonAttrs(m, ts),
+		StartTimestamp:   startTs,
+		SampleCount:      int64(dp.Count),
+		SumMs:            *dp.Sum,
+		SessionSource:    m.takeString("session_source"),
+	}
+	row.Attrs = m.leftover()
+	return row, nil
+}
+
+func parseCodexSkillInjected(dp *mpb.NumberDataPoint, resourceAttrs []*commonpb.KeyValue) (CodexMetricSkillInjectedRow, error) {
+	m := newAttrMap(resourceAttrs, dp.Attributes)
+	ts, startTs := dataPointTimestamps(dp)
+	value, ok := numberDataPointAsInt(dp)
+	if !ok {
+		return CodexMetricSkillInjectedRow{}, fmt.Errorf("codex skill injected: value not int-like")
+	}
+	row := CodexMetricSkillInjectedRow{
+		CodexCommonAttrs: extractCodexCommonAttrs(m, ts),
+		StartTimestamp:   startTs,
+		Value:            value,
+		Skill:            m.takeString("skill"),
+		Status:           m.takeString("status"),
+		InvokeType:       m.takeString("invoke_type"),
+		SessionSource:    m.takeString("session_source"),
+	}
+	row.Attrs = m.leftover()
+	return row, nil
 }
 
 func parseSessionCount(dp *mpb.NumberDataPoint, resourceAttrs []*commonpb.KeyValue) (MetricSessionCountRow, error) {

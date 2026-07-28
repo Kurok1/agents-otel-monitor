@@ -192,6 +192,17 @@ function capitalize(s: string): string {
 }
 
 export function metaForGroup(group: string): ModelMeta {
+  const sourceMatch = group.match(/ · (Claude|Codex)$/);
+  if (sourceMatch) {
+    const base = group.slice(0, -sourceMatch[0].length);
+    const meta = metaForGroup(base);
+    return {
+      ...meta,
+      id: group,
+      label: `${meta.label} · ${sourceMatch[1]}`,
+      color: colorFor(group),
+    };
+  }
   const m = group.match(CLAUDE_GROUP_RE);
   if (m) {
     const family = m[1];
@@ -321,8 +332,7 @@ export const Dashboard = {
     const [snap, trends, rankings, heatmap, rates, pricing] = await Promise.all([
       getJSON<SnapshotWire>(`/api/usage/snapshot?range=${range}&client=${client}`),
       getJSON<TrendsWire>(`/api/usage/trends?range=${range}&client=${client}`),
-      // rankings 本期维持 Claude-only(两家工具命名空间不同),不传 client
-      getJSON<RankingsWire>(`/api/usage/rankings?since=${since}`),
+      getJSON<RankingsWire>(`/api/usage/rankings?since=${since}&client=${client}`),
       getJSON<HeatmapWire>(`/api/usage/heatmap?client=${client}`),
       getJSON<RatesWire>(`/api/usage/rates?range=${range}&client=${client}`),
       getJSON<PricingWire>(`/api/pricing/models?client=${client}`),
