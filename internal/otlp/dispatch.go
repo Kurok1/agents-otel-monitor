@@ -55,6 +55,11 @@ var (
 	errSkippedEvent  = errors.New("skipped event")
 )
 
+const (
+	codexSkillInjectedMetricName = "codex.skill.injected"
+	codexServiceTBTMetricName    = "codex.responses_api_engine_service_tbt.duration_ms"
+)
+
 func (d *Dispatcher) DispatchMetrics(req *metricspb.ExportMetricsServiceRequest) DispatchSummary {
 	summary := DispatchSummary{
 		MetricRows: make(map[string]int),
@@ -64,6 +69,38 @@ func (d *Dispatcher) DispatchMetrics(req *metricspb.ExportMetricsServiceRequest)
 		resourceAttrs := rm.Resource.GetAttributes()
 		for _, sm := range rm.ScopeMetrics {
 			for _, m := range sm.Metrics {
+				if m.Name == codexSkillInjectedMetricName {
+					sum, ok := m.Data.(*mpb.Metric_Sum)
+					if !ok || sum.Sum == nil ||
+						sum.Sum.AggregationTemporality != mpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA ||
+						!sum.Sum.IsMonotonic {
+						d.log.Warn("metric parse failed", "metric", m.Name, "err", "expected monotonic delta sum")
+						summary.Errors++
+						continue
+					}
+				}
+				if m.Name == codexServiceTBTMetricName {
+					histogram, ok := m.Data.(*mpb.Metric_Histogram)
+					if !ok || histogram.Histogram == nil ||
+						histogram.Histogram.AggregationTemporality != mpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA {
+						d.log.Warn("metric parse failed", "metric", m.Name, "err", "expected delta histogram")
+						summary.Errors++
+						continue
+					}
+					for _, dp := range histogram.Histogram.DataPoints {
+						r, err := parseCodexResponseTBT(dp, resourceAttrs)
+						if err == nil {
+							err = d.sink.AppendMetric(r)
+						}
+						if err != nil {
+							d.log.Warn("metric parse failed", "metric", m.Name, "err", err)
+							summary.Errors++
+							continue
+						}
+						summary.MetricRows[m.Name]++
+					}
+					continue
+				}
 				points, ok := metricNumberPoints(m)
 				if !ok {
 					summary.Unknown[m.Name]++
@@ -138,6 +175,12 @@ func metricNumberPoints(m *mpb.Metric) ([]*mpb.NumberDataPoint, bool) {
 
 func (d *Dispatcher) dispatchMetric(name string, dp *mpb.NumberDataPoint, resourceAttrs []*commonpb.KeyValue) error {
 	switch name {
+	case codexSkillInjectedMetricName:
+		r, err := parseCodexSkillInjected(dp, resourceAttrs)
+		if err != nil {
+			return err
+		}
+		return d.sink.AppendMetric(r)
 	case "claude_code.session.count":
 		r, err := parseSessionCount(dp, resourceAttrs)
 		if err != nil {

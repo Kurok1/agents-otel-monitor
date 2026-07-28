@@ -2,6 +2,12 @@
 
 > 状态：**已评审定稿**（v1），所有开放问题在 §9 已闭环。
 > 关联文档：[`docs/models.md`](models.md)（表结构）、[`docs/protocol.md`](protocol.md)（字段含义）、`frontend/src/api/dashboard.ts`（前端期望的数据形状）。
+>
+> Codex 扩展说明（2026-07-28）：当前 usage / rankings / sessions API 均支持
+> `client=all|claude|codex`。排名会按客户端选择 Claude 与 Codex 的工具表，
+> Skill 排名还会合并 `codex_metric_skill_injected` 的成功 DELTA 值；生成速度的
+> Codex 口径为原生 service TBT。以下正文保留最初 Claude-only v1 的设计背景，
+> 当前口径以 [`protocol.md`](protocol.md) §7 和实现代码为准。
 
 ---
 

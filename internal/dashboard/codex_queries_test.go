@@ -8,8 +8,22 @@ package dashboard
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
+
+	metricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	mpb "go.opentelemetry.io/proto/otlp/metrics/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+
+	"github.com/kuroky/claude-code-monitor/internal/config"
+	"github.com/kuroky/claude-code-monitor/internal/otlp"
+	"github.com/kuroky/claude-code-monitor/internal/store"
 )
 
 // ── Codex 种子 helpers ──────────────────────────────────────────────
@@ -63,6 +77,237 @@ func insertCodexConversationStarts(t *testing.T, db *sql.DB, ts time.Time, conv 
 	`, ts, conv)
 	if err != nil {
 		t.Fatalf("insert codex conversation_starts: %v", err)
+	}
+}
+
+func newCodexMetricTestService(t *testing.T) (*store.DB, *otlp.MetricsService, *slog.Logger) {
+	t.Helper()
+	db, err := store.Open(config.StorageConfig{
+		DuckDBPath: filepath.Join(t.TempDir(), "codex-metrics.duckdb"),
+	})
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("db.Close: %v", err)
+		}
+	})
+	migrations, err := store.LoadMigrations()
+	if err != nil {
+		t.Fatalf("LoadMigrations: %v", err)
+	}
+	if err := store.RunMigrations(db.SQL, migrations); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	writer, err := store.NewBufferedWriter(db, config.IngestConfig{
+		BatchSize:       1,
+		FlushInterval:   config.Duration(time.Hour),
+		BufferHardLimit: 100,
+	}, log)
+	if err != nil {
+		t.Fatalf("NewBufferedWriter: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := writer.Stop(); err != nil {
+			t.Errorf("writer.Stop: %v", err)
+		}
+	})
+	service := otlp.NewMetricsService(log, nil, otlp.NewDispatcher(log, writer, nil))
+	return db, service, log
+}
+
+func TestHandleRankings_CodexTools(t *testing.T) {
+	db, w, _ := testDB(t)
+	ts := w.TodayStartUTC.Add(time.Hour)
+	insertToolResult(t, db, ts, "Read")
+	insertCodexToolResult(t, db, ts, "conv-rankings", "exec_command")
+	insertCodexToolResult(t, db, ts.Add(time.Second), "conv-rankings", "exec_command")
+
+	h, err := NewHandler(db, config.DashboardConfig{
+		Timezone: "Asia/Shanghai",
+		TopN:     config.TopNConfig{Tools: 10, Skills: 10},
+	}, false, nil)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/usage/rankings?since=all&client=codex", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp RankingsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Tools) != 1 || resp.Tools[0].Name != "exec_command" || resp.Tools[0].Count != 2 {
+		t.Fatalf("tools = %+v, want exec_command=2", resp.Tools)
+	}
+}
+
+func TestHandleRankings_AllTools(t *testing.T) {
+	db, w, _ := testDB(t)
+	ts := w.TodayStartUTC.Add(time.Hour)
+	insertToolResult(t, db, ts, "Read")
+	insertCodexToolResult(t, db, ts.Add(time.Second), "conv-rankings-all", "exec_command")
+
+	h, err := NewHandler(db, config.DashboardConfig{
+		Timezone: "Asia/Shanghai",
+		TopN:     config.TopNConfig{Tools: 10, Skills: 10},
+	}, false, nil)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/usage/rankings?since=all&client=all", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp RankingsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Tools) != 2 {
+		t.Fatalf("tools = %+v, want Read and exec_command", resp.Tools)
+	}
+	if resp.Tools[0].Name != "Read" || resp.Tools[1].Name != "exec_command" {
+		t.Fatalf("tools = %+v, want deterministic Read then exec_command", resp.Tools)
+	}
+}
+
+func TestHandleRankings_CodexSkillMetric(t *testing.T) {
+	db, service, log := newCodexMetricTestService(t)
+	now := time.Now().UTC()
+	req := &metricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*mpb.ResourceMetrics{{
+			Resource: &resourcepb.Resource{},
+			ScopeMetrics: []*mpb.ScopeMetrics{{
+				Metrics: []*mpb.Metric{{
+					Name: "codex.skill.injected",
+					Data: &mpb.Metric_Sum{Sum: &mpb.Sum{
+						AggregationTemporality: mpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
+						IsMonotonic:            true,
+						DataPoints: []*mpb.NumberDataPoint{{
+							StartTimeUnixNano: uint64(now.Add(-time.Second).UnixNano()),
+							TimeUnixNano:      uint64(now.UnixNano()),
+							Value:             &mpb.NumberDataPoint_AsInt{AsInt: 1},
+							Attributes: []*commonpb.KeyValue{
+								{Key: "app.version", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "0.145.0"}}},
+								{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "gpt-5.6-sol"}}},
+								{Key: "skill", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "golang-patterns"}}},
+								{Key: "status", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "ok"}}},
+								{Key: "invoke_type", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "implicit"}}},
+							},
+						}},
+					}},
+				}},
+			}},
+		}},
+	}
+	if _, err := service.Export(context.Background(), req); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+
+	h, err := NewHandler(db.SQL, config.DashboardConfig{
+		Timezone: "Asia/Shanghai",
+		TopN:     config.TopNConfig{Tools: 10, Skills: 10},
+	}, false, log)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/usage/rankings?since=all&client=codex", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp RankingsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Skills) != 1 || resp.Skills[0].Name != "golang-patterns" || resp.Skills[0].Activations != 1 {
+		t.Fatalf("skills = %+v, want golang-patterns=1", resp.Skills)
+	}
+}
+
+func TestHandleRates_CodexServiceTBTMetric(t *testing.T) {
+	db, service, log := newCodexMetricTestService(t)
+	now := time.Now().UTC().Add(-time.Minute)
+	sumMs := 40.0
+	req := &metricspb.ExportMetricsServiceRequest{
+		ResourceMetrics: []*mpb.ResourceMetrics{{
+			Resource: &resourcepb.Resource{},
+			ScopeMetrics: []*mpb.ScopeMetrics{{
+				Metrics: []*mpb.Metric{{
+					Name: "codex.responses_api_engine_service_tbt.duration_ms",
+					Data: &mpb.Metric_Histogram{Histogram: &mpb.Histogram{
+						AggregationTemporality: mpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA,
+						DataPoints: []*mpb.HistogramDataPoint{{
+							StartTimeUnixNano: uint64(now.Add(-time.Second).UnixNano()),
+							TimeUnixNano:      uint64(now.UnixNano()),
+							Count:             2,
+							Sum:               &sumMs,
+							ExplicitBounds:    []float64{5, 10, 25},
+							BucketCounts:      []uint64{0, 0, 2, 0},
+							Attributes: []*commonpb.KeyValue{
+								{Key: "app.version", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "0.145.0"}}},
+								{Key: "model", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "gpt-5.6-sol"}}},
+								{Key: "session_source", Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: "exec"}}},
+							},
+						}},
+					}},
+				}},
+			}},
+		}},
+	}
+	if _, err := service.Export(context.Background(), req); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	var storedRows, storedSamples int64
+	var storedSumMs float64
+	if err := db.SQL.QueryRow(`
+		SELECT COUNT(*), COALESCE(SUM(sample_count), 0), COALESCE(SUM(sum_ms), 0)
+		FROM codex_metric_response_tbt
+	`).Scan(&storedRows, &storedSamples, &storedSumMs); err != nil {
+		t.Fatalf("query stored TBT: %v", err)
+	}
+	if storedRows != 1 || storedSamples != 2 || storedSumMs != 40 {
+		t.Fatalf("stored TBT = rows=%d samples=%d sum_ms=%v, want 1/2/40", storedRows, storedSamples, storedSumMs)
+	}
+
+	h, err := NewHandler(db.SQL, config.DashboardConfig{
+		Timezone: "Asia/Shanghai",
+		TopN:     config.TopNConfig{Tools: 10, Skills: 10},
+	}, false, log)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/api/usage/rates?range=day&client=codex", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp RatesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Speed.Current == nil || *resp.Speed.Current < 49.99 || *resp.Speed.Current > 50.01 {
+		t.Fatalf("current = %v, want 50 tok/s", resp.Speed.Current)
+	}
+	if len(resp.Speed.Groups) != 1 || resp.Speed.Groups[0] != "gpt-5.6-sol" {
+		t.Fatalf("groups = %v, want [gpt-5.6-sol]", resp.Speed.Groups)
+	}
+	var found bool
+	for _, point := range resp.Speed.Points {
+		if got, ok := point.Values["gpt-5.6-sol"]; ok {
+			found = got > 49.99 && got < 50.01
+		}
+	}
+	if !found {
+		t.Fatalf("speed points do not contain gpt-5.6-sol=50: %+v", resp.Speed.Points)
 	}
 }
 

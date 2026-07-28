@@ -35,14 +35,38 @@ func BuildRates(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow, rn
 		group string
 	}
 	type cellAgg struct {
-		out, dur int64
+		units, dur float64
 	}
-	cells := make(map[cellKey]*cellAgg)
-	groupOut := make(map[string]int64)
+	type classifiedSpeedRow struct {
+		speedBucketRow
+		group string
+	}
+	classified := make([]classifiedSpeedRow, 0, len(speedRows))
+	groupSources := make(map[string]map[Client]struct{})
 	for _, r := range speedRows {
 		g := c.Classify(r.Model)
 		if g == "" {
 			continue
+		}
+		classified = append(classified, classifiedSpeedRow{speedBucketRow: r, group: g})
+		sources := groupSources[g]
+		if sources == nil {
+			sources = make(map[Client]struct{}, 1)
+			groupSources[g] = sources
+		}
+		sources[r.Client] = struct{}{}
+	}
+
+	cells := make(map[cellKey]*cellAgg)
+	groupWeight := make(map[string]float64)
+	for _, r := range classified {
+		g := r.group
+		if len(groupSources[g]) > 1 {
+			if r.Client == ClientCodex {
+				g += " · Codex"
+			} else {
+				g += " · Claude"
+			}
 		}
 		idx := spec.BucketIndex(r.Hour)
 		if idx < 0 {
@@ -54,18 +78,18 @@ func BuildRates(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow, rn
 			a = &cellAgg{}
 			cells[k] = a
 		}
-		a.out += r.OutTokens
+		a.units += r.Units
 		a.dur += r.DurMs
-		groupOut[g] += r.OutTokens
+		groupWeight[g] += r.Units
 	}
 
-	groups := make([]string, 0, len(groupOut))
-	for g := range groupOut {
+	groups := make([]string, 0, len(groupWeight))
+	for g := range groupWeight {
 		groups = append(groups, g)
 	}
 	sort.Slice(groups, func(i, j int) bool {
-		if groupOut[groups[i]] != groupOut[groups[j]] {
-			return groupOut[groups[i]] > groupOut[groups[j]]
+		if groupWeight[groups[i]] != groupWeight[groups[j]] {
+			return groupWeight[groups[i]] > groupWeight[groups[j]]
 		}
 		return groups[i] < groups[j]
 	})
@@ -76,26 +100,31 @@ func BuildRates(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow, rn
 		values := make(map[string]float64, len(groups))
 		for _, g := range groups {
 			if a, ok := cells[cellKey{idx: i, group: g}]; ok && a.dur > 0 {
-				values[g] = float64(a.out) * 1000 / float64(a.dur)
+				values[g] = a.units * 1000 / a.dur
 			}
 		}
 		speedPoints = append(speedPoints, ratesPointAt(bucketStart, spec.Interval, w.Loc, values))
 	}
 
-	cur, err := QuerySpeedWindow(ctx, db, client, spec.Start, spec.End)
-	if err != nil {
-		return resp, err
-	}
-	prevStart := spec.Start.Add(-time.Duration(spec.Count) * spec.Interval)
-	prev, err := QuerySpeedWindow(ctx, db, client, prevStart, spec.Start)
-	if err != nil {
-		return resp, err
+	var current, previous *float64
+	if client == ClientClaude || client == ClientCodex {
+		cur, err := QuerySpeedWindow(ctx, db, client, spec.Start, spec.End)
+		if err != nil {
+			return resp, err
+		}
+		prevStart := spec.Start.Add(-time.Duration(spec.Count) * spec.Interval)
+		prev, err := QuerySpeedWindow(ctx, db, client, prevStart, spec.Start)
+		if err != nil {
+			return resp, err
+		}
+		current = windowTokPerSec(cur, client)
+		previous = windowTokPerSec(prev, client)
 	}
 	resp.Speed = SpeedBlock{
 		Groups:   groups,
 		Points:   speedPoints,
-		Current:  windowTokPerSec(cur),
-		Previous: windowTokPerSec(prev),
+		Current:  current,
+		Previous: previous,
 	}
 
 	// ── 吞吐率:小时行落桶累加,末桶按实际流逝分钟归一 ──
@@ -136,13 +165,17 @@ func BuildRates(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow, rn
 	return resp, nil
 }
 
-// windowTokPerSec converts a window numerator/denominator into tok/s;
-// nil when the window has no usable requests.
-func windowTokPerSec(sw speedWindow) *float64 {
-	if sw.DurMs <= 0 {
+// windowTokPerSec converts one source's numerator/denominator into tok/s.
+// Claude request speed and Codex native TBT are deliberately not compared or
+// merged, so all-client views never expose the whole-window KPI.
+func windowTokPerSec(sw speedWindow, client Client) *float64 {
+	if client != ClientClaude && client != ClientCodex {
 		return nil
 	}
-	v := float64(sw.OutTokens) * 1000 / float64(sw.DurMs)
+	if sw.DurMs <= 0 || sw.Sources != 1 {
+		return nil
+	}
+	v := sw.Units * 1000 / sw.DurMs
 	return &v
 }
 

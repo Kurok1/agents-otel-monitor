@@ -12,16 +12,17 @@ import (
 type RankingsOpts struct {
 	SinceStart time.Time // zero ⇒ all-time
 	SinceTag   string
+	Client     Client
 	ToolsTopN  int
 	SkillsTopN int
 }
 
 func BuildRankings(ctx context.Context, db *sql.DB, opts RankingsOpts) (RankingsResponse, error) {
-	tools, err := QueryToolsRanking(ctx, db, opts.SinceStart, opts.ToolsTopN)
+	tools, err := QueryToolsRanking(ctx, db, opts)
 	if err != nil {
 		return RankingsResponse{}, err
 	}
-	skills, err := QuerySkillsRanking(ctx, db, opts.SinceStart, opts.SkillsTopN)
+	skills, err := QuerySkillsRanking(ctx, db, opts)
 	if err != nil {
 		return RankingsResponse{}, err
 	}

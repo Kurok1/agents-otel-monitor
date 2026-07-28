@@ -1,19 +1,19 @@
 # claude-code-monitor
 
-Go 实现的 Claude Code 监控服务。接收 Claude Code 通过 **OTLP gRPC** 推送的 Metrics 与 Events，落到本地 DuckDB（一指标 / 一事件 = 一张表，共 **19 张表**），便于后续做聚合分析与可视化。
+Go 实现的 Claude Code / OpenAI Codex 监控服务。通过 **OTLP gRPC** 接收两种客户端的 Metrics 与 Events，落到本地 DuckDB（一指标 / 一事件 = 一张表，共 **27 张表**），便于后续做聚合分析与可视化。
 
 ---
 
 ## 架构
 
 ```
-Claude Code (gRPC)
+Claude Code / Codex (gRPC)
         │  :4317
         ▼
 [OTLP MetricsService / LogsService]
         │
         ▼
-[Dispatcher]  → 按 metric.name / event.name 路由到 19 个强类型 row 结构体
+[Dispatcher]  → 按 metric.name / event.name 路由到 27 个强类型 row 结构体
         │
         ▼
 [BufferedWriter]  → 每张表独立 buffer + DuckDB Appender
@@ -59,7 +59,7 @@ cp config.example.yaml config.yaml
 
 启动后会看到：
 ```
-buffered writer ready  tables=19
+buffered writer ready  tables=27
 stats server listening addr=127.0.0.1:9100 web_ui=true
 grpc server listening  addr=127.0.0.1:4317
 ```
@@ -68,7 +68,7 @@ grpc server listening  addr=127.0.0.1:4317
 
 | 端口 | 协议 | 用途 |
 |---|---|---|
-| `4317` | gRPC (HTTP/2) | OTLP 接收，**只接 Claude Code，不要用浏览器访问** |
+| `4317` | gRPC (HTTP/2) | Claude Code / Codex OTLP 接收，**不要用浏览器访问** |
 | `9100` | HTTP/1.1 | Web UI（`/`）+ 查询 API（`/api/usage/*`）+ stats（`/internal/*`）+ pprof（`/debug/pprof/*`） |
 
 浏览器访问 **`http://localhost:9100/`** 即可看到前端看板。**前提**：先在 `frontend/` 跑过 `npm run build`，二进制重新 `go build` 一次（前端产物通过 `//go:embed` 嵌入）。前端没构建时 server 启动日志里会有 `web UI not mounted`，`/` 会回落到原先的纯文本说明页。
@@ -110,11 +110,13 @@ Codex **不读取标准 OTEL 环境变量**，只认 `~/.codex/config.toml` 的 
 [otel]
 environment = "prod"
 exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
-metrics_exporter = "none"   # 不配置的话 metrics 默认发往 OpenAI 自己的 Statsig 端点
+metrics_exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
 # log_user_prompt = true    # 可选：上报 prompt 原文（默认 "[REDACTED]"）
 ```
 
-Codex 事件落入 6 张 `codex_event_*` 表（会话 / API 请求 / token 用量 / prompt / 工具决策与结果），详见 `docs/protocol.md` §7 与 `docs/models.md` §7。注意：Codex 不上报成本（cost_usd），token 计数是子集式口径（cached ⊂ input、reasoning ⊂ output）。自 v2.4.0 起可选启用 `pricing`（默认关闭）按 LiteLLM 计价表在 ingest 时**估算** Codex 成本，落入 `codex_event_token_usage.cost_usd`——配置见 `config.example.yaml` 的 `pricing` 段。
+Logs 落入 6 张 `codex_event_*` 表（会话 / API 请求 / token 用量 / prompt / 工具决策与结果）；Metrics 中的 Skill 注入和原生 TBT 分别落入 `codex_metric_skill_injected`、`codex_metric_response_tbt`。**必须同时配置 `exporter` 与 `metrics_exporter`**；后者只影响启用后的新会话，历史 Skill / TBT 无法回填。详见 `docs/protocol.md` §7 与 `docs/models.md` §7。
+
+注意：Codex 不上报成本（cost_usd），token 计数是子集式口径（cached ⊂ input、reasoning ⊂ output）。自 v2.4.0 起可选启用 `pricing`（默认关闭）按 LiteLLM 计价表在 ingest 时**估算** Codex 成本，落入 `codex_event_token_usage.cost_usd`——配置见 `config.example.yaml` 的 `pricing` 段。
 
 ### 4. 查询
 
@@ -237,7 +239,7 @@ pkill -TERM -f 'bin/server -config'                # 手动停
 GET /                                       Web UI（SPA，前端构建后才有）
 GET /api/usage/snapshot?range=day|week|month  KPI（tokens/cost/cache 按 range 切）+ 模型明细
 GET /api/usage/trends?range=day|week|month  各模型 Token 用量趋势
-GET /api/usage/rankings?since=7d|30d|all    工具 + Skill Top10 排名（仅 Claude）
+GET /api/usage/rankings?since=7d|30d|all    工具 + Skill Top10 排名
 GET /api/usage/heatmap                      360 天用量热点图
 GET /api/usage/rates?range=day|week|month   生产速率：生成速度（tok/s）+ 吞吐率（tok/min），滑动窗口细粒度分桶
 GET /api/pricing/models                     价目表：实际出现过的模型 × LiteLLM 单价（$/1M，需启用 pricing）
@@ -248,7 +250,7 @@ GET /internal/stats                         per-table buffer 计数
 GET /debug/pprof/*                          运行时 profile（enable_pprof: true 时）
 ```
 
-usage / sessions 端点均支持 `client=all|claude|codex`（缺省 `all`）按客户端过滤；rankings 维持 Claude-only（两家工具命名空间不同）。Codex 的 token 统计口径为子集式，合并总量 = input + output（不重复计 cached/reasoning）。成本：Claude 为客户端自报的权威值；Codex 为可选估算值（启用 `pricing` 后），响应用 `cost_estimated` 标记，前端在 codex/all 视图标注「含估算」。
+usage / rankings / sessions 端点均支持 `client=all|claude|codex`（缺省 `all`）按客户端过滤。工具排名在 `all` 下直接合并两家的原始工具名；Skill 排名将 Claude 的 `skill_activated` 与 Codex 成功的 `skill.injected` delta 相加。Codex 的 token 统计口径为子集式，合并总量 = input + output（不重复计 cached/reasoning）。生成速度：Claude 使用 output tokens / 请求耗时，Codex 使用 `1000 / 平均 service TBT(ms)`；两种口径不会合并成一个 all-client KPI。成本：Claude 为客户端自报的权威值；Codex 为可选估算值（启用 `pricing` 后），响应用 `cost_estimated` 标记，前端在 codex/all 视图标注「含估算」。
 
 查询 API 设计与每个端点的 SQL 见 [`docs/plan-v2-query-api.md`](docs/plan-v2-query-api.md)。响应统一带 `Cache-Control: private, max-age=30`，所有时间窗按 `dashboard.timezone`（默认 `Asia/Shanghai`）切分。
 

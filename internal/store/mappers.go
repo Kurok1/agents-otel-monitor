@@ -482,6 +482,8 @@ var allTables = []tableSpec{
 	{"event_mcp_server_connection", mapMCPServerConnection},
 	{"event_skill_activated", mapSkillActivated},
 	{"event_at_mention", mapAtMention},
+	{"codex_metric_skill_injected", mapCodexSkillInjected},
+	{"codex_metric_response_tbt", mapCodexResponseTBT},
 	{"codex_event_conversation_starts", mapCodexConversationStarts},
 	{"codex_event_api_request", mapCodexApiRequest},
 	{"codex_event_token_usage", mapCodexTokenUsage},
@@ -532,6 +534,10 @@ func tableNameFor(row any) (string, bool) {
 		return "event_skill_activated", true
 	case otlp.EventAtMentionRow:
 		return "event_at_mention", true
+	case otlp.CodexMetricSkillInjectedRow:
+		return "codex_metric_skill_injected", true
+	case otlp.CodexMetricResponseTBTRow:
+		return "codex_metric_response_tbt", true
 	case otlp.CodexEventConversationStartsRow:
 		return "codex_event_conversation_starts", true
 	case otlp.CodexEventApiRequestRow:

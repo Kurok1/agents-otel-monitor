@@ -344,7 +344,7 @@ func TestQueryToolsRanking(t *testing.T) {
 	insertToolResult(t, db, ts, "Grep")
 	insertToolResult(t, db, w.TodayStartUTC.Add(-40*24*time.Hour), "Read")
 
-	got, err := QueryToolsRanking(context.Background(), db, time.Time{}, 10)
+	got, err := QueryToolsRanking(context.Background(), db, RankingsOpts{Client: ClientAll, ToolsTopN: 10})
 	if err != nil {
 		t.Fatalf("QueryToolsRanking: %v", err)
 	}
@@ -352,7 +352,11 @@ func TestQueryToolsRanking(t *testing.T) {
 		t.Errorf("all-time: %+v", got)
 	}
 
-	got, err = QueryToolsRanking(context.Background(), db, w.TodayStartUTC.Add(-7*24*time.Hour), 10)
+	got, err = QueryToolsRanking(context.Background(), db, RankingsOpts{
+		Client:     ClientAll,
+		SinceStart: w.TodayStartUTC.Add(-7 * 24 * time.Hour),
+		ToolsTopN:  10,
+	})
 	if err != nil {
 		t.Fatalf("QueryToolsRanking 7d: %v", err)
 	}
@@ -371,7 +375,10 @@ func TestQuerySkillsRanking(t *testing.T) {
 		insertSkillActivated(t, db, ts, "pdf")
 	}
 
-	got, _ := QuerySkillsRanking(context.Background(), db, time.Time{}, 10)
+	got, err := QuerySkillsRanking(context.Background(), db, RankingsOpts{Client: ClientAll, SkillsTopN: 10})
+	if err != nil {
+		t.Fatalf("QuerySkillsRanking: %v", err)
+	}
 	if len(got) != 2 || got[0].Name != "frontend-design" || got[0].Activations != 7 {
 		t.Errorf("ranking = %+v", got)
 	}

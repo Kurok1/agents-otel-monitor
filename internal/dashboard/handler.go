@@ -130,6 +130,11 @@ func (h *Handler) handleTrends(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleRankings(w http.ResponseWriter, r *http.Request) {
+	client, err := ParseClient(r.URL.Query().Get("client"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	tw, err := NowWindow(time.Now(), h.cfg.Timezone)
 	if err != nil {
 		h.log.Error("rankings: build time window", "err", err)
@@ -144,6 +149,7 @@ func (h *Handler) handleRankings(w http.ResponseWriter, r *http.Request) {
 	resp, err := BuildRankings(r.Context(), h.db, RankingsOpts{
 		SinceStart: sinceStart,
 		SinceTag:   sinceTag,
+		Client:     client,
 		ToolsTopN:  h.cfg.TopN.Tools,
 		SkillsTopN: h.cfg.TopN.Skills,
 	})

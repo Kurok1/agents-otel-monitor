@@ -1,7 +1,7 @@
 # @author Kurok1 <im.kurokyhanc@gmail.com>
 # @since v2.5.0
 
-# PR 打开(或 draft 转正式)时自动以仓库所有者身份评论 "@codex review"，
+# PR 打开(包括 Draft)或 Draft 转正式时自动以仓库所有者身份评论 "@codex review"，
 # 触发 Codex GitHub App(ChatGPT Codex Connector)审核代码。审核结果由
 # Codex 直接以 PR review 形式贴回，不阻断合并。
 #
@@ -24,7 +24,6 @@ permissions:
 jobs:
   trigger-review:
     name: Trigger Codex review
-    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       # 前置校验放在独立 shell step:若 secret 为空,github-script 会在

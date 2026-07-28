@@ -364,19 +364,19 @@ prompt 中的 `@`-mention 被解析时记录。
 
 ---
 
-## 7. Codex CLI 事件（v1 核心用量）
+## 7. Codex CLI 遥测
 
-自 v2.2 起同步接收 OpenAI Codex CLI 的 OTEL 遥测（调研与决策见 `docs/superpowers/specs/2026-07-01-codex-otel-support-design.md`，实测基线 codex-cli 0.142.5）。Codex 只用 OTEL **Logs** 信号（其 metrics 是 histogram/counter、traces 无需求，均不接收）。
+自 v2.2 起同步接收 OpenAI Codex CLI 的 OTEL Logs；当前同时接收 Dashboard 所需的 Skill 与 TBT Metrics（调研与决策见 `docs/superpowers/specs/2026-07-01-codex-otel-support-design.md`，本节 Metrics 实测基线 codex-cli 0.145.0）。
 
 ### 7.1 客户端配置
 
-Codex **不读取标准 OTEL 环境变量**，只认 `~/.codex/config.toml` 的 `[otel]` 段；Logs 导出默认关闭：
+Codex **不读取标准 OTEL 环境变量**，只认 `~/.codex/config.toml` 的 `[otel]` 段；Logs 与 Metrics 都需要指向本服务：
 
 ```toml
 [otel]
 environment = "prod"
 exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
-metrics_exporter = "none"   # 默认为 statsig（发往 OpenAI），建议显式关闭
+metrics_exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
 ```
 
 ### 7.2 Resource 与公共属性
@@ -400,7 +400,16 @@ metrics_exporter = "none"   # 默认为 statsig（发往 OpenAI），建议显�
 
 范围外（识别但不落库，计入 Unknown）：`codex.startup_phase`、`codex.websocket_connect` / `websocket_request`、`codex.auth_recovery`、`codex.turn_ttft`、`codex.sandbox_outcome`、`codex.network_proxy.policy_decision`、`codex.plugin_install_*`。
 
-### 7.4 token 口径（与 Claude Code 的关键差异）
+### 7.4 入库 Metrics
+
+| Metric | OTLP 形态 | 入库表 | 用途 |
+|---|---|---|---|
+| `codex.skill.injected` | monotonic DELTA Sum | `codex_metric_skill_injected` | 保存 `value`、`skill`、`status`、`invoke_type`、`session_source`；排名只累加 `status=ok/success` |
+| `codex.responses_api_engine_service_tbt.duration_ms` | DELTA Histogram | `codex_metric_response_tbt` | 每个 DataPoint 仅保存 `sample_count` 与 `sum_ms`，不展开 bucket；生成速度 = `sample_count × 1000 / sum_ms` |
+
+TBT 是相邻生成 token 的平均时间（time between tokens），适合作为 Codex 的纯解码速度。`codex.websocket_request.duration_ms` 实测只有 WebSocket 发送开销，并非模型生成耗时，不能用于该指标。Metrics 当前不带稳定的 request / turn ID，因此接收端不做时间戳模糊关联。
+
+### 7.5 token 口径（与 Claude Code 的关键差异）
 
 OpenAI 计数是**子集式**：`cached ⊂ input`、`reasoning ⊂ output`；Anthropic 是**并列式**（cacheRead / cacheCreation 独立于 input）。统一总量公式：
 

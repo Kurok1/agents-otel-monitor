@@ -550,19 +550,35 @@ func QueryTrends(ctx context.Context, db *sql.DB, client Client, w TimeWindow, g
 // ─────────────────────────────────────────────────────────────────────
 
 // QueryToolsRanking — Top N tools by call count.
-// sinceStart zero ⇒ all-time (predicate elided via `IS NULL OR ts >= ?`).
-func QueryToolsRanking(ctx context.Context, db *sql.DB, sinceStart time.Time, limit int) ([]ToolRank, error) {
-	const q = `
+// opts.SinceStart zero ⇒ all-time (predicate elided via `IS NULL OR ts >= ?`).
+func QueryToolsRanking(ctx context.Context, db *sql.DB, opts RankingsOpts) ([]ToolRank, error) {
+	var source string
+	switch opts.Client {
+	case "", ClientAll:
+		source = `
+			SELECT ts, tool_name FROM event_tool_result
+			UNION ALL
+			SELECT ts, tool_name FROM codex_event_tool_result
+		`
+	case ClientClaude:
+		source = `SELECT ts, tool_name FROM event_tool_result`
+	case ClientCodex:
+		source = `SELECT ts, tool_name FROM codex_event_tool_result`
+	default:
+		return nil, fmt.Errorf("query tools ranking: invalid client %q", opts.Client)
+	}
+	q := fmt.Sprintf(`
+		WITH tools AS (%s)
 		SELECT tool_name AS name, COUNT(*) AS count
-		FROM event_tool_result
+		FROM tools
 		WHERE tool_name IS NOT NULL
 		  AND (? IS NULL OR ts >= ?)
 		GROUP BY tool_name
-		ORDER BY count DESC
+		ORDER BY count DESC, name
 		LIMIT ?
-	`
-	since := nullableTime(sinceStart)
-	rows, err := db.QueryContext(ctx, q, since, since, limit)
+	`, source)
+	since := nullableTime(opts.SinceStart)
+	rows, err := db.QueryContext(ctx, q, since, since, opts.ToolsTopN)
 	if err != nil {
 		return nil, fmt.Errorf("query tools ranking: %w", err)
 	}
@@ -580,18 +596,44 @@ func QueryToolsRanking(ctx context.Context, db *sql.DB, sinceStart time.Time, li
 }
 
 // QuerySkillsRanking — Top N skills by activation count.
-func QuerySkillsRanking(ctx context.Context, db *sql.DB, sinceStart time.Time, limit int) ([]SkillRank, error) {
-	const q = `
-		SELECT skill_name AS name, COUNT(*) AS activations
-		FROM event_skill_activated
-		WHERE skill_name IS NOT NULL
+func QuerySkillsRanking(ctx context.Context, db *sql.DB, opts RankingsOpts) ([]SkillRank, error) {
+	var source string
+	switch opts.Client {
+	case "", ClientAll:
+		source = `
+			SELECT ts, skill_name AS skill, 1::BIGINT AS activations
+			FROM event_skill_activated
+			UNION ALL
+			SELECT ts, skill, value AS activations
+			FROM codex_metric_skill_injected
+			WHERE LOWER(status) IN ('ok', 'success')
+		`
+	case ClientClaude:
+		source = `
+			SELECT ts, skill_name AS skill, 1::BIGINT AS activations
+			FROM event_skill_activated
+		`
+	case ClientCodex:
+		source = `
+			SELECT ts, skill, value AS activations
+			FROM codex_metric_skill_injected
+			WHERE LOWER(status) IN ('ok', 'success')
+		`
+	default:
+		return nil, fmt.Errorf("query skills ranking: invalid client %q", opts.Client)
+	}
+	q := fmt.Sprintf(`
+		WITH skills AS (%s)
+		SELECT skill AS name, SUM(activations) AS activations
+		FROM skills
+		WHERE skill IS NOT NULL
 		  AND (? IS NULL OR ts >= ?)
-		GROUP BY skill_name
-		ORDER BY activations DESC
+		GROUP BY skill
+		ORDER BY activations DESC, name
 		LIMIT ?
-	`
-	since := nullableTime(sinceStart)
-	rows, err := db.QueryContext(ctx, q, since, since, limit)
+	`, source)
+	since := nullableTime(opts.SinceStart)
+	rows, err := db.QueryContext(ctx, q, since, since, opts.SkillsTopN)
 	if err != nil {
 		return nil, fmt.Errorf("query skills ranking: %w", err)
 	}
@@ -916,27 +958,28 @@ func QueryCodexSessionCost(ctx context.Context, db *sql.DB, conversationID strin
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Rates — /api/usage/rates (speed = output tokens per request-second,
-// throughput = tokens per wall-clock minute)
+// Rates — /api/usage/rates (Claude speed = output tokens/request-second,
+// Codex speed = inverse native service TBT, throughput = tokens/wall minute)
 //
 // SQL groups by date_trunc('hour', ts) (UTC hours == local hours for the
 // whole-hour-offset zones we support); the builder merges hour rows into
-// 1h/6h/1d buckets via RatesSpec.BucketIndex. Weighted-average numerators
-// and denominators survive that merge losslessly.
+// 1h/6h/1d buckets via RatesSpec.BucketIndex. Each client arm keeps its own
+// ratio components; cross-client KPI values are never combined.
 // ─────────────────────────────────────────────────────────────────────
 
 type speedBucketRow struct {
-	Hour      time.Time
-	Model     string
-	OutTokens int64
-	DurMs     int64
+	Hour   time.Time
+	Model  string
+	Client Client
+	Units  float64
+	DurMs  float64
 }
 
-// QuerySpeedBuckets returns per-(hour, raw model) sums of output tokens and
-// request duration for [start, end). Rows from both arms are appended as-is —
-// the builder folds models into groups and merges across arms.
+// QuerySpeedBuckets returns ratio components for [start, end). Claude units
+// are output tokens over request duration; Codex units are native service-TBT
+// histogram samples over their summed milliseconds (1000 / mean TBT).
 func QuerySpeedBuckets(ctx context.Context, db *sql.DB, client Client, start, end time.Time) ([]speedBucketRow, error) {
-	scanInto := func(q, label string, out []speedBucketRow) ([]speedBucketRow, error) {
+	scanInto := func(q, label string, source Client, out []speedBucketRow) ([]speedBucketRow, error) {
 		rows, err := db.QueryContext(ctx, q, start, end)
 		if err != nil {
 			return nil, fmt.Errorf("query %s: %w", label, err)
@@ -944,10 +987,11 @@ func QuerySpeedBuckets(ctx context.Context, db *sql.DB, client Client, start, en
 		defer rows.Close()
 		for rows.Next() {
 			var r speedBucketRow
-			if err := rows.Scan(&r.Hour, &r.Model, &r.OutTokens, &r.DurMs); err != nil {
+			if err := rows.Scan(&r.Hour, &r.Model, &r.Units, &r.DurMs); err != nil {
 				return nil, fmt.Errorf("scan %s: %w", label, err)
 			}
 			r.Hour = r.Hour.UTC()
+			r.Client = source
 			out = append(out, r)
 		}
 		return out, rows.Err()
@@ -958,28 +1002,30 @@ func QuerySpeedBuckets(ctx context.Context, db *sql.DB, client Client, start, en
 	if client.includesClaude() {
 		const q = `
 			SELECT date_trunc('hour', ts) AS h, model,
-			       SUM(output_tokens) AS out_tokens, SUM(duration_ms) AS dur_ms
+			       CAST(SUM(output_tokens) AS DOUBLE) AS units,
+			       CAST(SUM(duration_ms) AS DOUBLE) AS dur_ms
 			FROM event_api_request
 			WHERE ts >= ? AND ts < ?
 			  AND model IS NOT NULL AND model <> ''
 			  AND duration_ms > 0 AND output_tokens > 0
 			GROUP BY 1, 2
 		`
-		if out, err = scanInto(q, "speed buckets (claude)", out); err != nil {
+		if out, err = scanInto(q, "speed buckets (claude)", ClientClaude, out); err != nil {
 			return nil, err
 		}
 	}
 	if client.includesCodex() {
 		const q = `
 			SELECT date_trunc('hour', ts) AS h, model,
-			       SUM(output_token_count) AS out_tokens, SUM(duration_ms) AS dur_ms
-			FROM codex_event_token_usage
+			       CAST(SUM(sample_count) AS DOUBLE) AS units,
+			       SUM(sum_ms) AS dur_ms
+			FROM codex_metric_response_tbt
 			WHERE ts >= ? AND ts < ?
 			  AND model IS NOT NULL AND model <> ''
-			  AND duration_ms > 0 AND output_token_count > 0
+			  AND sample_count > 0 AND sum_ms > 0
 			GROUP BY 1, 2
 		`
-		if out, err = scanInto(q, "speed buckets (codex)", out); err != nil {
+		if out, err = scanInto(q, "speed buckets (codex)", ClientCodex, out); err != nil {
 			return nil, err
 		}
 	}
@@ -987,8 +1033,9 @@ func QuerySpeedBuckets(ctx context.Context, db *sql.DB, client Client, start, en
 }
 
 type speedWindow struct {
-	OutTokens int64
-	DurMs     int64
+	Units   float64
+	DurMs   float64
+	Sources int
 }
 
 // QuerySpeedWindow returns whole-window numerator/denominator for the speed
@@ -997,32 +1044,40 @@ func QuerySpeedWindow(ctx context.Context, db *sql.DB, client Client, start, end
 	var r speedWindow
 	if client.includesClaude() {
 		const q = `
-			SELECT COALESCE(SUM(output_tokens), 0), COALESCE(SUM(duration_ms), 0)
+			SELECT COALESCE(CAST(SUM(output_tokens) AS DOUBLE), 0),
+			       COALESCE(CAST(SUM(duration_ms) AS DOUBLE), 0)
 			FROM event_api_request
 			WHERE ts >= ? AND ts < ?
 			  AND model IS NOT NULL AND model <> ''
 			  AND duration_ms > 0 AND output_tokens > 0
 		`
 		var c speedWindow
-		if err := db.QueryRowContext(ctx, q, start, end).Scan(&c.OutTokens, &c.DurMs); err != nil {
+		if err := db.QueryRowContext(ctx, q, start, end).Scan(&c.Units, &c.DurMs); err != nil {
 			return r, fmt.Errorf("query speed window (claude): %w", err)
 		}
-		r.OutTokens += c.OutTokens
+		if c.DurMs > 0 {
+			r.Sources++
+		}
+		r.Units += c.Units
 		r.DurMs += c.DurMs
 	}
 	if client.includesCodex() {
 		const q = `
-			SELECT COALESCE(SUM(output_token_count), 0), COALESCE(SUM(duration_ms), 0)
-			FROM codex_event_token_usage
+			SELECT COALESCE(CAST(SUM(sample_count) AS DOUBLE), 0),
+			       COALESCE(SUM(sum_ms), 0)
+			FROM codex_metric_response_tbt
 			WHERE ts >= ? AND ts < ?
 			  AND model IS NOT NULL AND model <> ''
-			  AND duration_ms > 0 AND output_token_count > 0
+			  AND sample_count > 0 AND sum_ms > 0
 		`
 		var c speedWindow
-		if err := db.QueryRowContext(ctx, q, start, end).Scan(&c.OutTokens, &c.DurMs); err != nil {
+		if err := db.QueryRowContext(ctx, q, start, end).Scan(&c.Units, &c.DurMs); err != nil {
 			return r, fmt.Errorf("query speed window (codex): %w", err)
 		}
-		r.OutTokens += c.OutTokens
+		if c.DurMs > 0 {
+			r.Sources++
+		}
+		r.Units += c.Units
 		r.DurMs += c.DurMs
 	}
 	return r, nil
