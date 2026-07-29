@@ -242,6 +242,7 @@ GET /api/usage/trends?range=day|week|month  各模型 Token 用量趋势
 GET /api/usage/rankings?since=7d|30d|all    工具 + Skill Top10 排名
 GET /api/usage/heatmap                      360 天用量热点图
 GET /api/usage/rates?range=day|week|month   生产速率：生成速度（tok/s）+ 吞吐率（tok/min），滑动窗口细粒度分桶
+GET /api/usage/rates/realtime?client=codex  即时生成速度：最近 2 分钟与前一段 2 分钟的加权平均
 GET /api/pricing/models                     价目表：实际出现过的模型 × LiteLLM 单价（$/1M，需启用 pricing）
 GET /api/sessions?limit=                    会话列表（Claude session + Codex conversation 混排）
 GET /api/sessions/{id}                      会话详情

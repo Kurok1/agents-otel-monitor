@@ -179,6 +179,20 @@ func TestQueryThroughputBuckets(t *testing.T) {
 	}
 }
 
+func TestBuildRealtimeSpeedAllSkipsIncompatibleSources(t *testing.T) {
+	now := time.Date(2026, 7, 28, 10, 30, 0, 0, time.UTC)
+	resp, err := BuildRealtimeSpeed(context.Background(), nil, now, ClientAll)
+	if err != nil {
+		t.Fatalf("BuildRealtimeSpeed(all): %v", err)
+	}
+	if resp.Client != ClientAll || resp.WindowSeconds != 120 || resp.AsOf != now.Format(time.RFC3339) {
+		t.Errorf("metadata = %+v", resp)
+	}
+	if resp.Current != nil || resp.Previous != nil {
+		t.Errorf("all-client speed = current:%v previous:%v, want null/null", resp.Current, resp.Previous)
+	}
+}
+
 func TestBuildRatesWeightedMergeAcrossGroups(t *testing.T) {
 	db, w, _ := testDB(t)
 	c, err := NewClassifier(nil)

@@ -13,7 +13,7 @@ import (
 	"github.com/kuroky/claude-code-monitor/internal/config"
 )
 
-// Handler exposes /api/usage/{snapshot,trends,rankings,heatmap}.
+// Handler exposes /api/usage/{snapshot,trends,rankings,heatmap,rates}.
 // All endpoints serve JSON and short-cache via `Cache-Control: private, max-age=30`.
 type Handler struct {
 	db             *sql.DB
@@ -56,6 +56,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleHeatmap(w, r)
 	case "/api/usage/rates":
 		h.handleRates(w, r)
+	case "/api/usage/rates/realtime":
+		h.handleRealtimeSpeed(w, r)
 	case "/api/pricing/models":
 		h.handlePricingModels(w, r)
 	case "/api/sessions":
@@ -261,6 +263,21 @@ func (h *Handler) handleRates(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.log.Error("rates: build", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) handleRealtimeSpeed(w http.ResponseWriter, r *http.Request) {
+	client, err := ParseClient(r.URL.Query().Get("client"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	resp, err := BuildRealtimeSpeed(r.Context(), h.db, time.Now(), client)
+	if err != nil {
+		h.log.Error("realtime speed: build", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}

@@ -211,6 +211,19 @@ type RatesResponse struct {
 	Throughput     ThroughputBlock `json:"throughput"`
 }
 
+// RealtimeSpeedResponse → GET /api/usage/rates/realtime?client=
+//
+// Current is the source-native weighted speed over the trailing window;
+// Previous covers the equally sized window immediately before it. AsOf is
+// the shared exclusive upper bound so clients can display data freshness.
+type RealtimeSpeedResponse struct {
+	Client        Client   `json:"client"`
+	WindowSeconds int      `json:"window_seconds"`
+	AsOf          string   `json:"as_of"`
+	Current       *float64 `json:"current"`
+	Previous      *float64 `json:"previous"`
+}
+
 // SpeedBlock: Groups is the legend order (window source-weight descending).
 // A group absent from a bucket's Values means "no data" (frontend breaks the
 // line). Current/Previous are whole-window source-native averages; nil when

@@ -549,6 +549,170 @@ body[data-theme="dark"] .kpi__delta.down { color: #E47B7B; background: color-mix
   font-weight: 600;
 }
 
+/* ── Realtime speed gauge ── */
+.speed-gauge-card {
+  min-height: 340px;
+  overflow: hidden;
+}
+
+.speed-gauge__head {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.speed-gauge__head h3 {
+  color: var(--fg-1);
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0 0 2px;
+}
+
+.speed-gauge__delta {
+  align-items: center;
+  border-radius: var(--radius-pill);
+  display: inline-flex;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  padding: 4px 9px;
+}
+
+.speed-gauge__delta.up {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.speed-gauge__delta.down {
+  background: var(--color-error-bg);
+  color: var(--color-error);
+}
+
+body[data-theme="dark"] .speed-gauge__delta.up {
+  background: color-mix(in oklab, #2D7D46 22%, transparent);
+  color: #6BC180;
+}
+
+body[data-theme="dark"] .speed-gauge__delta.down {
+  background: color-mix(in oklab, #C93535 22%, transparent);
+  color: #E47B7B;
+}
+
+.speed-gauge__dial {
+  height: 238px;
+  margin: -10px auto 0;
+  max-width: 410px;
+  position: relative;
+  width: 100%;
+}
+
+.speed-gauge__dial svg {
+  display: block;
+  height: 100%;
+  overflow: visible;
+  width: 100%;
+}
+
+.speed-gauge__track,
+.speed-gauge__value {
+  fill: none;
+  stroke-linecap: round;
+  stroke-width: 13;
+}
+
+.speed-gauge__track {
+  stroke: var(--bg-inset);
+}
+
+.speed-gauge__value {
+  transition: stroke-dasharray 450ms ease-out;
+}
+
+.speed-gauge__ticks line {
+  stroke: var(--fg-3);
+  stroke-linecap: round;
+  stroke-width: 2;
+}
+
+.speed-gauge__needle {
+  stroke: var(--fg-1);
+  stroke-linecap: round;
+  stroke-width: 3;
+  transition: transform 450ms ease-out;
+}
+
+.speed-gauge__hub {
+  fill: var(--fg-1);
+  stroke: var(--bg-surface);
+  stroke-width: 4;
+}
+
+.speed-gauge__scale {
+  fill: var(--fg-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.speed-gauge__readout {
+  align-items: baseline;
+  bottom: -5px;
+  display: flex;
+  gap: 6px;
+  justify-content: center;
+  left: 50%;
+  position: absolute;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.speed-gauge__readout strong {
+  color: var(--fg-1);
+  font-family: var(--font-serif);
+  font-size: 42px;
+  font-weight: 300;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+
+.speed-gauge__readout span {
+  color: var(--fg-3);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.speed-gauge__footer {
+  align-items: center;
+  border-top: 1px dashed var(--border-default);
+  color: var(--fg-3);
+  display: flex;
+  font-size: 11px;
+  gap: 12px;
+  justify-content: space-between;
+  padding-top: 10px;
+}
+
+.speed-gauge__source {
+  align-items: center;
+  color: var(--fg-2);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 500;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.speed-gauge__source i {
+  border-radius: 3px;
+  display: inline-block;
+  height: 9px;
+  width: 9px;
+}
+
+.speed-gauge__footer > span:last-child {
+  white-space: nowrap;
+}
+
 /* ── Two-col grid ── */
 .cols-2 {
   display: grid;
