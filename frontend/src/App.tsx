@@ -3,7 +3,7 @@ import { Icon } from './components/Icon';
 import { Sparkline } from './components/charts/Sparkline';
 import { StackedAreaChart } from './components/charts/StackedAreaChart';
 import type { ChartSeries } from './components/charts/StackedAreaChart';
-import { LineChart } from './components/charts/LineChart';
+import { SpeedGauge } from './components/charts/SpeedGauge';
 import { DonutChart } from './components/charts/DonutChart';
 import { CalendarHeatmap } from './components/charts/CalendarHeatmap';
 import { TweaksPanel, useTweaks } from './components/TweaksPanel';
@@ -139,6 +139,30 @@ export default function App() {
     const i = window.setInterval(() => setNow(new Date()), 60_000);
     return () => window.clearInterval(i);
   }, []);
+
+  // The gauge has its own lightweight refresh path. Historical charts keep
+  // their five-minute cadence; only the bounded four-minute aggregation is
+  // polled every minute.
+  useEffect(() => {
+    if (client === 'all') return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      Dashboard.fetchRealtimeSpeed(client)
+        .then(realtime => {
+          if (cancelled) return;
+          setData(current => current
+            ? { ...current, rates: { ...current.rates, realtime } }
+            : current);
+        })
+        .catch(err => {
+          if (!cancelled) console.error('realtime speed fetch failed', err);
+        });
+    }, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [client]);
 
   // Auto-refresh aligned to wall-clock 5-minute marks (xx:00, xx:05, ...).
   // Re-uses the manual refresh path by bumping refreshKey; the fetch
@@ -305,24 +329,25 @@ export default function App() {
     cache_creation: { label: '缓存写', color: '#D4860A' },
   };
 
-  const speedSeries: ChartSeries[] = data.rates.speed.groups.map(m => ({
-    id: m.id,
-    label: m.label,
-    color: m.color,
-    on: true,
-  }));
   const throughputSeries: ChartSeries[] = data.rates.throughput.types.map(t => ({
     id: t,
     label: THROUGHPUT_META[t]?.label ?? t,
     color: THROUGHPUT_META[t]?.color ?? 'var(--fg-3)',
     on: true,
   }));
-  const speedCur = data.rates.speed.current;
-  const speedPrev = data.rates.speed.previous;
-  const speedDelta =
-    speedCur != null && speedPrev != null && speedPrev > 0
-      ? ((speedCur - speedPrev) / speedPrev) * 100
-      : undefined;
+  const realtimeSpeed = data.rates.realtime;
+  const speedSourceLabel =
+    client === 'codex'
+      ? 'Codex · 原生 TBT'
+      : client === 'claude'
+        ? 'Claude Code · 请求耗时'
+        : '选择单一客户端';
+  const speedMetricLabel =
+    client === 'codex'
+      ? 'TBT 加权平均'
+      : client === 'claude'
+        ? '请求耗时加权平均'
+        : '客户端原生口径';
 
   // 单价格式化:>=1 保留两位;<1 保留两位有效数字(如 $0.075);null → —
   const fmtPrice = (v: number | null): string => {
@@ -522,59 +547,21 @@ export default function App() {
           <div>
             <h2>生产速率</h2>
             <p>
-              {RATES_WINDOW_LABEL[range]} ·{' '}
-              {client === 'codex'
-                ? '生成速度按 Codex 原生 TBT 换算'
-                : client === 'claude'
-                  ? '生成速度按请求耗时加权'
-                  : 'Claude 按请求耗时 · Codex 按原生 TBT'}{' '}
-              · 吞吐率按墙钟时间归一
+              生成速度每分钟刷新 · 吞吐率 {RATES_WINDOW_LABEL[range]}，按墙钟时间归一
             </p>
           </div>
         </div>
 
         <div className="cols-2">
-          <section className="card">
-            <div className="card-head">
-              <div>
-                <h3>生成速度</h3>
-                <div className="card-sub">
-                  {client === 'codex'
-                    ? '1000 / 平均 TBT · 按模型分组'
-                    : client === 'claude'
-                      ? 'output tokens / 请求耗时 · 按模型分组'
-                      : '按客户端原生口径 · 按模型分组'}
-                </div>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <div className="kpi__value" style={{ fontSize: 22 }}>
-                  <span>{speedCur == null ? '—' : speedCur.toFixed(1)}</span>
-                  <span className="kpi__unit">tok/s</span>
-                </div>
-                {speedDelta != null && (
-                  <span className={`kpi__delta ${speedDelta >= 0 ? 'up' : 'down'}`}>
-                    {speedDelta >= 0 ? '↑' : '↓'} {Math.abs(speedDelta).toFixed(1)}% vs 前一窗口
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="trends__legend">
-              {data.rates.speed.groups.map(m => (
-                <span key={m.id} className="legend-chip" data-on>
-                  <span className="legend-chip__dot" style={{ background: m.color }} />
-                  <span>{m.label}</span>
-                </span>
-              ))}
-            </div>
-            <LineChart points={data.rates.speed.points} series={speedSeries} height={240} />
-            <div className="card-sub">
-              {client === 'codex'
-                ? '注：TBT 是相邻生成 token 的平均间隔；数值越高表示纯解码越快。'
-                : client === 'claude'
-                  ? '注：耗时含首 token 等待，数值略低于纯解码速度；失败请求不计入。'
-                  : '注：两家速度口径不同，混合视图不合并顶部 KPI；切换客户端可查看单一口径。'}
-            </div>
-          </section>
+          <SpeedGauge
+            value={realtimeSpeed.current}
+            previous={realtimeSpeed.previous}
+            windowSeconds={realtimeSpeed.windowSeconds}
+            asOf={realtimeSpeed.asOf}
+            sourceLabel={speedSourceLabel}
+            metricLabel={speedMetricLabel}
+            color="var(--accent)"
+          />
 
           <section className="card">
             <div className="card-head">

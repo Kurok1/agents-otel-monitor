@@ -16,6 +16,49 @@ import (
 // throughputTypes is the fixed wire order of the stacked throughput series.
 var throughputTypes = []string{"input", "output", "cache_read", "cache_creation"}
 
+const realtimeSpeedWindow = 2 * time.Minute
+
+// BuildRealtimeSpeed assembles the lightweight speed KPI polled by the
+// dashboard. It scans only the trailing four minutes and returns adjacent
+// two-minute weighted windows, avoiding the historical bucket queries in
+// BuildRates.
+func BuildRealtimeSpeed(
+	ctx context.Context,
+	db *sql.DB,
+	now time.Time,
+	client Client,
+) (RealtimeSpeedResponse, error) {
+	asOf := now.UTC()
+	resp := RealtimeSpeedResponse{
+		Client:        client,
+		WindowSeconds: int(realtimeSpeedWindow / time.Second),
+		AsOf:          asOf.Format(time.RFC3339),
+	}
+	// Claude request duration and Codex native TBT are incompatible speed
+	// methods. The all-client view therefore has no scalar KPI and can return
+	// without touching either telemetry table.
+	if client == ClientAll {
+		return resp, nil
+	}
+	split := asOf.Add(-realtimeSpeedWindow)
+	windows, err := QuerySpeedWindowPair(
+		ctx,
+		db,
+		client,
+		speedWindowBounds{
+			Start: split.Add(-realtimeSpeedWindow),
+			Split: split,
+			End:   asOf,
+		},
+	)
+	if err != nil {
+		return resp, fmt.Errorf("build realtime speed: %w", err)
+	}
+	resp.Current = windowTokPerSec(windows.Current, client)
+	resp.Previous = windowTokPerSec(windows.Previous, client)
+	return resp, nil
+}
+
 // BuildRates assembles /api/usage/rates: per-bucket weighted speed by model
 // group, whole-window speed KPIs, and per-bucket throughput by token type.
 func BuildRates(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow, rng string, client Client) (RatesResponse, error) {

@@ -75,6 +75,14 @@ export interface PricedModel {
   last_seen: string;
 }
 
+export interface RealtimeSpeed {
+  client: Client;
+  windowSeconds: number;
+  asOf: string;
+  current: number | null;
+  previous: number | null;
+}
+
 export interface DashboardData {
   updatedAt: string;
   range: Range;
@@ -114,6 +122,7 @@ export interface DashboardData {
   };
   rates: {
     bucketInterval: string;
+    realtime: RealtimeSpeed;
     speed: {
       groups: ModelMeta[];
       points: SeriesPoint[]; // date=桶起点 RFC3339;缺 key = 断线
@@ -316,6 +325,14 @@ interface RatesWire {
   };
 }
 
+interface RealtimeSpeedWire {
+  client: Client;
+  window_seconds: number;
+  as_of: string;
+  current: number | null;
+  previous: number | null;
+}
+
 interface PricingWire {
   enabled: boolean;
   table_entries?: number;
@@ -329,15 +346,21 @@ interface PricingWire {
 
 export const Dashboard = {
   async fetch(range: Range = 'day', since: Since = '7d', client: Client = 'all'): Promise<DashboardData> {
-    const [snap, trends, rankings, heatmap, rates, pricing] = await Promise.all([
+    const [snap, trends, rankings, heatmap, rates, realtimeSpeed, pricing] = await Promise.all([
       getJSON<SnapshotWire>(`/api/usage/snapshot?range=${range}&client=${client}`),
       getJSON<TrendsWire>(`/api/usage/trends?range=${range}&client=${client}`),
       getJSON<RankingsWire>(`/api/usage/rankings?since=${since}&client=${client}`),
       getJSON<HeatmapWire>(`/api/usage/heatmap?client=${client}`),
       getJSON<RatesWire>(`/api/usage/rates?range=${range}&client=${client}`),
+      getJSON<RealtimeSpeedWire>(`/api/usage/rates/realtime?client=${client}`),
       getJSON<PricingWire>(`/api/pricing/models?client=${client}`),
     ]);
-    return adapt(snap, trends, rankings, heatmap, rates, pricing);
+    return adapt(snap, trends, rankings, heatmap, rates, realtimeSpeed, pricing);
+  },
+
+  async fetchRealtimeSpeed(client: Client = 'all'): Promise<RealtimeSpeed> {
+    const wire = await getJSON<RealtimeSpeedWire>(`/api/usage/rates/realtime?client=${client}`);
+    return adaptRealtimeSpeed(wire);
   },
 };
 
@@ -347,6 +370,7 @@ function adapt(
   rankings: RankingsWire,
   heatmap: HeatmapWire,
   rates: RatesWire,
+  realtimeSpeed: RealtimeSpeedWire,
   pricing: PricingWire,
 ): DashboardData {
   // rate 点复用 SeriesPoint 形状:wire 的 ts 落到 date 字段
@@ -383,6 +407,7 @@ function adapt(
     heatmap: { weights: heatmap.weights, points: heatmap.points },
     rates: {
       bucketInterval: rates.bucket_interval,
+      realtime: adaptRealtimeSpeed(realtimeSpeed),
       speed: {
         groups: rates.speed.groups.map(g => metaForGroup(g)),
         points: ratePoints(rates.speed.points),
@@ -399,5 +424,15 @@ function adapt(
       tableEntries: pricing.table_entries ?? 0,
       models: pricing.models ?? [],
     },
+  };
+}
+
+function adaptRealtimeSpeed(wire: RealtimeSpeedWire): RealtimeSpeed {
+  return {
+    client: wire.client,
+    windowSeconds: wire.window_seconds,
+    asOf: wire.as_of,
+    current: wire.current,
+    previous: wire.previous,
   };
 }

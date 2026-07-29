@@ -1038,6 +1038,82 @@ type speedWindow struct {
 	Sources int
 }
 
+type speedWindowPair struct {
+	Current  speedWindow
+	Previous speedWindow
+}
+
+type speedWindowBounds struct {
+	Start time.Time
+	Split time.Time
+	End   time.Time
+}
+
+// QuerySpeedWindowPair returns adjacent speed windows with one bounded scan
+// per included telemetry source. start <= ts < split feeds Previous while
+// split <= ts < end feeds Current.
+func QuerySpeedWindowPair(
+	ctx context.Context,
+	db *sql.DB,
+	client Client,
+	bounds speedWindowBounds,
+) (speedWindowPair, error) {
+	var out speedWindowPair
+	scanSource := func(q, label string) error {
+		var currentUnits, currentDur, previousUnits, previousDur float64
+		if err := db.QueryRowContext(ctx, q,
+			bounds.Split, bounds.Split, bounds.Split, bounds.Split, bounds.Start, bounds.End,
+		).Scan(&currentUnits, &currentDur, &previousUnits, &previousDur); err != nil {
+			return fmt.Errorf("query realtime speed windows (%s): %w", label, err)
+		}
+		if currentDur > 0 {
+			out.Current.Sources++
+		}
+		if previousDur > 0 {
+			out.Previous.Sources++
+		}
+		out.Current.Units += currentUnits
+		out.Current.DurMs += currentDur
+		out.Previous.Units += previousUnits
+		out.Previous.DurMs += previousDur
+		return nil
+	}
+
+	if client.includesClaude() {
+		const q = `
+			SELECT
+			  COALESCE(CAST(SUM(CASE WHEN ts >= ? THEN output_tokens ELSE 0 END) AS DOUBLE), 0),
+			  COALESCE(CAST(SUM(CASE WHEN ts >= ? THEN duration_ms ELSE 0 END) AS DOUBLE), 0),
+			  COALESCE(CAST(SUM(CASE WHEN ts <  ? THEN output_tokens ELSE 0 END) AS DOUBLE), 0),
+			  COALESCE(CAST(SUM(CASE WHEN ts <  ? THEN duration_ms ELSE 0 END) AS DOUBLE), 0)
+			FROM event_api_request
+			WHERE ts >= ? AND ts < ?
+			  AND model IS NOT NULL AND model <> ''
+			  AND duration_ms > 0 AND output_tokens > 0
+		`
+		if err := scanSource(q, "claude"); err != nil {
+			return out, err
+		}
+	}
+	if client.includesCodex() {
+		const q = `
+			SELECT
+			  COALESCE(CAST(SUM(CASE WHEN ts >= ? THEN sample_count ELSE 0 END) AS DOUBLE), 0),
+			  COALESCE(SUM(CASE WHEN ts >= ? THEN sum_ms ELSE 0 END), 0),
+			  COALESCE(CAST(SUM(CASE WHEN ts <  ? THEN sample_count ELSE 0 END) AS DOUBLE), 0),
+			  COALESCE(SUM(CASE WHEN ts <  ? THEN sum_ms ELSE 0 END), 0)
+			FROM codex_metric_response_tbt
+			WHERE ts >= ? AND ts < ?
+			  AND model IS NOT NULL AND model <> ''
+			  AND sample_count > 0 AND sum_ms > 0
+		`
+		if err := scanSource(q, "codex"); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}
+
 // QuerySpeedWindow returns whole-window numerator/denominator for the speed
 // KPI. Zero DurMs means "no usable requests" — the builder renders null.
 func QuerySpeedWindow(ctx context.Context, db *sql.DB, client Client, start, end time.Time) (speedWindow, error) {
