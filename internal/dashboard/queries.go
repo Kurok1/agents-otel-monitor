@@ -336,10 +336,17 @@ func QueryRequestsSparkline(ctx context.Context, db *sql.DB, client Client, w Ti
 // ─────────────────────────────────────────────────────────────────────
 
 type modelTokens struct {
-	Model       string
-	TokensIn    int64
-	TokensOut   int64
-	CacheTokens int64
+	Model                  string
+	TokensIn               int64
+	TokensOut              int64
+	CacheTokens            int64
+	ReasoningTokens        int64
+	InputCost              float64
+	OutputCost             float64
+	CacheReadCost          float64
+	InputCostAvailable     bool
+	OutputCostAvailable    bool
+	CacheReadCostAvailable bool
 }
 
 func QueryModelTokens(ctx context.Context, db *sql.DB, client Client) ([]modelTokens, error) {
@@ -351,7 +358,13 @@ func QueryModelTokens(ctx context.Context, db *sql.DB, client Client) ([]modelTo
 		defer rows.Close()
 		for rows.Next() {
 			var r modelTokens
-			if err := rows.Scan(&r.Model, &r.TokensIn, &r.TokensOut, &r.CacheTokens); err != nil {
+			if err := rows.Scan(
+				&r.Model,
+				&r.TokensIn,
+				&r.TokensOut,
+				&r.CacheTokens,
+				&r.ReasoningTokens,
+			); err != nil {
 				return nil, fmt.Errorf("scan %s: %w", label, err)
 			}
 			out = append(out, r)
@@ -367,7 +380,8 @@ func QueryModelTokens(ctx context.Context, db *sql.DB, client Client) ([]modelTo
 			  model,
 			  COALESCE(SUM(CASE WHEN type='input'     THEN value END), 0) AS tokens_in,
 			  COALESCE(SUM(CASE WHEN type='output'    THEN value END), 0) AS tokens_out,
-			  COALESCE(SUM(CASE WHEN type='cacheRead' THEN value END), 0) AS cache_tokens
+			  COALESCE(SUM(CASE WHEN type='cacheRead' THEN value END), 0) AS cache_tokens,
+			  0 AS reasoning_tokens
 			FROM metric_token_usage
 			WHERE model IS NOT NULL
 			GROUP BY model
@@ -383,7 +397,8 @@ func QueryModelTokens(ctx context.Context, db *sql.DB, client Client) ([]modelTo
 			SELECT model,
 			  COALESCE(SUM(COALESCE(input_token_count, 0) - COALESCE(cached_token_count, 0)), 0) AS tokens_in,
 			  COALESCE(SUM(COALESCE(output_token_count, 0)), 0)                                   AS tokens_out,
-			  COALESCE(SUM(COALESCE(cached_token_count, 0)), 0)                                   AS cache_tokens
+			  COALESCE(SUM(COALESCE(cached_token_count, 0)), 0)                                   AS cache_tokens,
+			  COALESCE(SUM(COALESCE(reasoning_token_count, 0)), 0)                                AS reasoning_tokens
 			FROM codex_event_token_usage
 			WHERE model IS NOT NULL
 			GROUP BY model

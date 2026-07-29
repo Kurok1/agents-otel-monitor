@@ -31,6 +31,10 @@ export interface ModelBreakdown extends ModelMeta {
   tokens_out: number;
   cache_tokens: number;
   cost: number;
+  input_cost: number | null;
+  output_cost: number | null;
+  cache_read_cost: number | null;
+  cost_breakdown_estimated: boolean;
   share: number;
 }
 
@@ -60,19 +64,6 @@ export interface HeatmapDay {
   cost: number;
   requests: number;
   score: number;
-}
-
-// 价目表一行:单价为 $/1M tokens;null = 计价表缺该字段;matched=false = 未收录。
-export interface PricedModel {
-  model: string;
-  clients: string[];
-  matched: boolean;
-  input_per_1m: number | null;
-  output_per_1m: number | null;
-  cache_read_per_1m: number | null;
-  reasoning_output_per_1m: number | null;
-  requests: number;
-  last_seen: string;
 }
 
 export interface RealtimeSpeed {
@@ -133,11 +124,6 @@ export interface DashboardData {
       types: string[];
       points: SeriesPoint[]; // 空桶为 0
     };
-  };
-  pricing: {
-    enabled: boolean;
-    tableEntries: number;
-    models: PricedModel[];
   };
 }
 
@@ -276,6 +262,10 @@ interface SnapshotWire {
     tokens_out: number;
     cache_tokens: number;
     cost: number;
+    input_cost: number | null;
+    output_cost: number | null;
+    cache_read_cost: number | null;
+    cost_breakdown_estimated: boolean;
     share: number;
   }>;
 }
@@ -333,29 +323,21 @@ interface RealtimeSpeedWire {
   previous: number | null;
 }
 
-interface PricingWire {
-  enabled: boolean;
-  table_entries?: number;
-  last_refresh?: string;
-  models: PricedModel[];
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // Public API
 // ─────────────────────────────────────────────────────────────────────
 
 export const Dashboard = {
   async fetch(range: Range = 'day', since: Since = '7d', client: Client = 'all'): Promise<DashboardData> {
-    const [snap, trends, rankings, heatmap, rates, realtimeSpeed, pricing] = await Promise.all([
+    const [snap, trends, rankings, heatmap, rates, realtimeSpeed] = await Promise.all([
       getJSON<SnapshotWire>(`/api/usage/snapshot?range=${range}&client=${client}`),
       getJSON<TrendsWire>(`/api/usage/trends?range=${range}&client=${client}`),
       getJSON<RankingsWire>(`/api/usage/rankings?since=${since}&client=${client}`),
       getJSON<HeatmapWire>(`/api/usage/heatmap?client=${client}`),
       getJSON<RatesWire>(`/api/usage/rates?range=${range}&client=${client}`),
       getJSON<RealtimeSpeedWire>(`/api/usage/rates/realtime?client=${client}`),
-      getJSON<PricingWire>(`/api/pricing/models?client=${client}`),
     ]);
-    return adapt(snap, trends, rankings, heatmap, rates, realtimeSpeed, pricing);
+    return adapt(snap, trends, rankings, heatmap, rates, realtimeSpeed);
   },
 
   async fetchRealtimeSpeed(client: Client = 'all'): Promise<RealtimeSpeed> {
@@ -371,7 +353,6 @@ function adapt(
   heatmap: HeatmapWire,
   rates: RatesWire,
   realtimeSpeed: RealtimeSpeedWire,
-  pricing: PricingWire,
 ): DashboardData {
   // rate 点复用 SeriesPoint 形状:wire 的 ts 落到 date 字段
   const ratePoints = (
@@ -392,6 +373,10 @@ function adapt(
       tokens_out: m.tokens_out,
       cache_tokens: m.cache_tokens,
       cost: m.cost,
+      input_cost: m.input_cost,
+      output_cost: m.output_cost,
+      cache_read_cost: m.cache_read_cost,
+      cost_breakdown_estimated: m.cost_breakdown_estimated,
       share: m.share,
     })),
     series: {
@@ -418,11 +403,6 @@ function adapt(
         types: rates.throughput.types,
         points: ratePoints(rates.throughput.points),
       },
-    },
-    pricing: {
-      enabled: pricing.enabled,
-      tableEntries: pricing.table_entries ?? 0,
-      models: pricing.models ?? [],
     },
   };
 }

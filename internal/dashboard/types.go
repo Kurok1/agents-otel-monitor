@@ -58,13 +58,17 @@ type CacheBlock struct {
 // group (e.g. "opus-4.7", "sonnet-4.6", "deepseek-v3"). Order in the
 // response is by total tokens descending so the busiest group sorts first.
 type ModelBlock struct {
-	Group       string  `json:"group"`
-	Requests    int64   `json:"requests"`
-	TokensIn    int64   `json:"tokens_in"`
-	TokensOut   int64   `json:"tokens_out"`
-	CacheTokens int64   `json:"cache_tokens"`
-	Cost        float64 `json:"cost"`
-	Share       float64 `json:"share"`
+	Group                  string   `json:"group"`
+	Requests               int64    `json:"requests"`
+	TokensIn               int64    `json:"tokens_in"`
+	TokensOut              int64    `json:"tokens_out"`
+	CacheTokens            int64    `json:"cache_tokens"`
+	Cost                   float64  `json:"cost"`
+	InputCost              *float64 `json:"input_cost"`
+	OutputCost             *float64 `json:"output_cost"`
+	CacheReadCost          *float64 `json:"cache_read_cost"`
+	CostBreakdownEstimated bool     `json:"cost_breakdown_estimated"`
+	Share                  float64  `json:"share"`
 }
 
 // TrendsResponse → GET /api/usage/trends?range=
@@ -275,4 +279,27 @@ type PricedModel struct {
 	ReasoningOutputPer1M *float64 `json:"reasoning_output_per_1m"`
 	Requests             int64    `json:"requests"`
 	LastSeen             string   `json:"last_seen"` // RFC3339 UTC
+}
+
+// PricingCatalogResponse → GET /api/pricing/catalog?prefix=&offset=&limit=
+//
+// Lists a page from the complete in-memory LiteLLM price table. TotalMatches
+// is the number of rows after prefix filtering and before pagination.
+type PricingCatalogResponse struct {
+	Enabled      bool                `json:"enabled"`
+	TableEntries int                 `json:"table_entries,omitempty"`
+	LastRefresh  string              `json:"last_refresh,omitempty"`
+	TotalMatches int                 `json:"total_matches"`
+	Offset       int                 `json:"offset"`
+	Limit        int                 `json:"limit"`
+	Models       []CatalogPriceModel `json:"models"`
+}
+
+// CatalogPriceModel is one full-catalog row. Prices are USD per 1M tokens.
+type CatalogPriceModel struct {
+	Model                string   `json:"model"`
+	InputPer1M           *float64 `json:"input_per_1m"`
+	OutputPer1M          *float64 `json:"output_per_1m"`
+	CacheReadPer1M       *float64 `json:"cache_read_per_1m"`
+	ReasoningOutputPer1M *float64 `json:"reasoning_output_per_1m"`
 }

@@ -5,12 +5,23 @@ import (
 	"database/sql"
 	"sort"
 	"time"
+
+	"github.com/kuroky/claude-code-monitor/internal/pricing"
 )
 
 // BuildSnapshot assembles the snapshot response for the given range and
 // client selection. Queries are sequential — DuckDB MaxOpenConns=1 makes
 // parallelism pointless.
-func BuildSnapshot(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow, rng string, client Client, pricingEnabled bool) (SnapshotResponse, error) {
+func BuildSnapshot(
+	ctx context.Context,
+	db *sql.DB,
+	c *Classifier,
+	w TimeWindow,
+	rng string,
+	client Client,
+	pricingEnabled bool,
+	prices PriceLookup,
+) (SnapshotResponse, error) {
 	var resp SnapshotResponse
 	resp.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
@@ -71,6 +82,7 @@ func BuildSnapshot(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow,
 	if err != nil {
 		return resp, err
 	}
+	attachModelCostBreakdowns(modelTok, prices, pricingEnabled)
 	modelC, err := QueryModelCost(ctx, db, client)
 	if err != nil {
 		return resp, err
@@ -105,6 +117,37 @@ func BuildSnapshot(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow,
 	}
 	resp.Models = mergeModelGroups(c, modelTok, modelC, modelR)
 	return resp, nil
+}
+
+func attachModelCostBreakdowns(rows []modelTokens, prices PriceLookup, enabled bool) {
+	if !enabled || prices == nil {
+		return
+	}
+	for i := range rows {
+		row := &rows[i]
+		price, ok := prices.PriceFor(row.Model)
+		if !ok {
+			continue
+		}
+		breakdown, _ := price.CostBreakdown(pricing.TokenCounts{
+			Input:     row.TokensIn + row.CacheTokens,
+			Output:    row.TokensOut,
+			Cached:    row.CacheTokens,
+			Reasoning: row.ReasoningTokens,
+		})
+		if breakdown.InputAvailable {
+			row.InputCost = breakdown.Input
+			row.InputCostAvailable = true
+		}
+		if breakdown.OutputAvailable {
+			row.OutputCost = breakdown.Output
+			row.OutputCostAvailable = true
+		}
+		if breakdown.CacheReadAvailable {
+			row.CacheReadCost = breakdown.CacheRead
+			row.CacheReadCostAvailable = true
+		}
+	}
 }
 
 // fillTokensSparkline pads the sparse query result to length spec.SparklineCount
@@ -170,6 +213,15 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 		tokensIn, tokensOut, cacheTokens int64
 		cost                             float64
 		requests                         int64
+		inputCost                        float64
+		outputCost                       float64
+		cacheReadCost                    float64
+		hasInputCost                     bool
+		hasOutputCost                    bool
+		hasCacheReadCost                 bool
+		missingInputCost                 bool
+		missingOutputCost                bool
+		missingCacheReadCost             bool
 	}
 	by := map[string]*acc{}
 	get := func(g string) *acc {
@@ -189,6 +241,24 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 		a.tokensIn += r.TokensIn
 		a.tokensOut += r.TokensOut
 		a.cacheTokens += r.CacheTokens
+		if r.InputCostAvailable {
+			a.inputCost += r.InputCost
+			a.hasInputCost = true
+		} else if r.TokensIn > 0 {
+			a.missingInputCost = true
+		}
+		if r.OutputCostAvailable {
+			a.outputCost += r.OutputCost
+			a.hasOutputCost = true
+		} else if r.TokensOut > 0 {
+			a.missingOutputCost = true
+		}
+		if r.CacheReadCostAvailable {
+			a.cacheReadCost += r.CacheReadCost
+			a.hasCacheReadCost = true
+		} else if r.CacheTokens > 0 {
+			a.missingCacheReadCost = true
+		}
 	}
 	for _, r := range costs {
 		g := c.Classify(r.Model)
@@ -220,7 +290,7 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 		if total > 0 {
 			share = float64(sum) / float64(total)
 		}
-		out = append(out, ModelBlock{
+		block := ModelBlock{
 			Group:       g,
 			Requests:    a.requests,
 			TokensIn:    a.tokensIn,
@@ -228,7 +298,20 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 			CacheTokens: a.cacheTokens,
 			Cost:        a.cost,
 			Share:       share,
-		})
+		}
+		if a.hasInputCost && !a.missingInputCost {
+			block.InputCost = float64Ptr(a.inputCost)
+			block.CostBreakdownEstimated = true
+		}
+		if a.hasOutputCost && !a.missingOutputCost {
+			block.OutputCost = float64Ptr(a.outputCost)
+			block.CostBreakdownEstimated = true
+		}
+		if a.hasCacheReadCost && !a.missingCacheReadCost {
+			block.CacheReadCost = float64Ptr(a.cacheReadCost)
+			block.CostBreakdownEstimated = true
+		}
+		out = append(out, block)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		si := out[i].TokensIn + out[i].TokensOut + out[i].CacheTokens
@@ -239,4 +322,8 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 		return out[i].Group < out[j].Group
 	})
 	return out
+}
+
+func float64Ptr(value float64) *float64 {
+	return &value
 }

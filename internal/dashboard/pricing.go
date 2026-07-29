@@ -22,6 +22,14 @@ type PriceLookup interface {
 	Stats() pricing.Stats
 }
 
+// PriceCatalogSource is the optional full-table capability used only by
+// /api/pricing/catalog. Keeping it separate lets snapshot and seen-model
+// callers depend on the smaller PriceLookup interface.
+type PriceCatalogSource interface {
+	SearchPrices(prefix string, offset, limit int) ([]pricing.PriceEntry, int)
+	Stats() pricing.Stats
+}
+
 // BuildPricingModels assembles /api/pricing/models: distinct seen models ×
 // price table lookup. Disabled pricing short-circuits without touching the DB.
 func BuildPricingModels(ctx context.Context, db *sql.DB, client Client, prices PriceLookup, enabled bool) (PricingModelsResponse, error) {
@@ -97,6 +105,50 @@ func BuildPricingModels(ctx context.Context, db *sql.DB, client Client, prices P
 		resp.Models = append(resp.Models, e.pm)
 	}
 	return resp, nil
+}
+
+func filterPricingModelsByPrefix(models []PricedModel, prefix string) []PricedModel {
+	filtered := make([]PricedModel, 0, len(models))
+	for _, model := range models {
+		if pricing.MatchesModelPrefix(model.Model, prefix) {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
+// BuildPricingCatalog assembles one page from the complete in-memory price
+// table. Disabled pricing returns a stable empty response.
+func BuildPricingCatalog(catalog PriceCatalogSource, enabled bool, prefix string, offset, limit int) PricingCatalogResponse {
+	resp := PricingCatalogResponse{
+		Enabled: enabled,
+		Offset:  offset,
+		Limit:   limit,
+		Models:  []CatalogPriceModel{},
+	}
+	if !enabled || catalog == nil {
+		resp.Enabled = false
+		return resp
+	}
+
+	st := catalog.Stats()
+	resp.TableEntries = st.Entries
+	if !st.LastRefreshAt.IsZero() {
+		resp.LastRefresh = st.LastRefreshAt.UTC().Format(time.RFC3339)
+	}
+
+	entries, total := catalog.SearchPrices(prefix, offset, limit)
+	resp.TotalMatches = total
+	for _, entry := range entries {
+		resp.Models = append(resp.Models, CatalogPriceModel{
+			Model:                entry.Model,
+			InputPer1M:           per1M(entry.Price.InputCostPerToken),
+			OutputPer1M:          per1M(entry.Price.OutputCostPerToken),
+			CacheReadPer1M:       per1M(entry.Price.CacheReadInputTokenCost),
+			ReasoningOutputPer1M: per1M(entry.Price.OutputCostPerReasoningToken),
+		})
+	}
+	return resp
 }
 
 // per1M converts a per-token USD rate into USD per 1M tokens; nil passes through.

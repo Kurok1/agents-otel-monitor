@@ -8,6 +8,8 @@ package dashboard
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -175,6 +177,165 @@ func TestHandlePricingModelsDisabledAndEnabled(t *testing.T) {
 	h2.ServeHTTP(rec, httptest.NewRequest("GET", "/api/pricing/models?client=x", nil))
 	if rec.Code != 400 {
 		t.Errorf("invalid client status = %d, want 400", rec.Code)
+	}
+}
+
+func TestHandlePricingCatalogSupportsPrefixAndPagination(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prices.json")
+	err := os.WriteFile(path, []byte(`{
+		"gpt-5.6-terra":{"input_cost_per_token":0.0000025,"output_cost_per_token":0.000015},
+		"claude-opus-4-8":{"input_cost_per_token":0.000005,"output_cost_per_token":0.000025},
+		"gpt-5.6-sol":{"input_cost_per_token":0.000005,"output_cost_per_token":0.00003}
+	}`), 0o600)
+	if err != nil {
+		t.Fatalf("write price table: %v", err)
+	}
+	engine, err := pricing.NewEngine(config.PricingConfig{Enabled: true, SourceFile: path}, nil)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	h := newRatesTestHandler(t, true)
+	h.SetPriceLookup(engine)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(
+		"GET",
+		"/api/pricing/catalog?prefix=GPT-5.6&offset=1&limit=1",
+		nil,
+	))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Enabled      bool `json:"enabled"`
+		TableEntries int  `json:"table_entries"`
+		TotalMatches int  `json:"total_matches"`
+		Offset       int  `json:"offset"`
+		Limit        int  `json:"limit"`
+		Models       []struct {
+			Model      string   `json:"model"`
+			InputPer1M *float64 `json:"input_per_1m"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Enabled || resp.TableEntries != 3 || resp.TotalMatches != 2 {
+		t.Fatalf("metadata = %+v, want enabled entries=3 matches=2", resp)
+	}
+	if resp.Offset != 1 || resp.Limit != 1 {
+		t.Fatalf("page metadata = offset:%d limit:%d, want 1/1", resp.Offset, resp.Limit)
+	}
+	if len(resp.Models) != 1 || resp.Models[0].Model != "gpt-5.6-terra" {
+		t.Fatalf("models = %+v, want second alphabetic GPT-5.6 model", resp.Models)
+	}
+	if resp.Models[0].InputPer1M == nil || *resp.Models[0].InputPer1M != 2.5 {
+		t.Fatalf("input_per_1m = %v, want 2.5", resp.Models[0].InputPer1M)
+	}
+}
+
+func TestHandlePricingModelsFiltersSeenModelsByPrefix(t *testing.T) {
+	db, w, _ := testDB(t)
+	at := w.TodayStartUTC.Add(time.Hour)
+	insertApiRequest(t, db, at, "claude-opus-4-8")
+	insertRateCodexUsage(t, db, at.Add(time.Minute), "gpt-5.6-sol", 100, 50, 0, 1000)
+
+	h, err := NewHandler(db, config.DashboardConfig{
+		Timezone: "Asia/Shanghai",
+		TopN:     config.TopNConfig{Tools: 10, Skills: 10},
+	}, true, nil)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	h.SetPriceLookup(fakePriceLookup{table: map[string]pricing.ModelPrice{
+		"claude-opus-4-8": {},
+		"gpt-5.6-sol":     {},
+	}})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(
+		"GET",
+		"/api/pricing/models?prefix=GPT-5.6",
+		nil,
+	))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp PricingModelsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Models) != 1 || resp.Models[0].Model != "gpt-5.6-sol" {
+		t.Fatalf("models = %+v, want only gpt-5.6-sol", resp.Models)
+	}
+}
+
+func TestHandleSnapshotIncludesEstimatedModelCostBreakdown(t *testing.T) {
+	db, _, _ := testDB(t)
+	_, err := db.Exec(`
+		INSERT INTO codex_event_token_usage
+			(ts, conversation_id, model, input_token_count, output_token_count,
+			 cached_token_count, reasoning_token_count, cost_usd)
+		VALUES (CURRENT_TIMESTAMP, 'conv-costs', 'gpt-5.6-sol', 1000, 500, 200, 100, 0.00195)
+	`)
+	if err != nil {
+		t.Fatalf("insert codex usage: %v", err)
+	}
+
+	h, err := NewHandler(db, config.DashboardConfig{
+		Timezone: "Asia/Shanghai",
+		TopN:     config.TopNConfig{Tools: 10, Skills: 10},
+	}, true, nil)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	h.SetPriceLookup(fakePriceLookup{table: map[string]pricing.ModelPrice{
+		"gpt-5.6-sol": {
+			InputCostPerToken:           f64(1e-6),
+			OutputCostPerToken:          f64(2e-6),
+			CacheReadInputTokenCost:     f64(0.25e-6),
+			OutputCostPerReasoningToken: f64(3e-6),
+		},
+	}})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(
+		"GET",
+		"/api/usage/snapshot?range=day&client=codex",
+		nil,
+	))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Models []struct {
+			Group         string   `json:"group"`
+			InputCost     *float64 `json:"input_cost"`
+			OutputCost    *float64 `json:"output_cost"`
+			CacheReadCost *float64 `json:"cache_read_cost"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Models) != 1 || resp.Models[0].Group != "gpt-5.6-sol" {
+		t.Fatalf("models = %+v, want gpt-5.6-sol", resp.Models)
+	}
+	model := resp.Models[0]
+	if model.InputCost == nil {
+		t.Error("input_cost = nil, want 0.0008")
+	} else if diff := *model.InputCost - 0.0008; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("input_cost = %.12f, want 0.0008", *model.InputCost)
+	}
+	if model.OutputCost == nil {
+		t.Error("output_cost = nil, want 0.0011")
+	} else if diff := *model.OutputCost - 0.0011; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("output_cost = %.12f, want 0.0011", *model.OutputCost)
+	}
+	if model.CacheReadCost == nil {
+		t.Error("cache_read_cost = nil, want 0.00005")
+	} else if diff := *model.CacheReadCost - 0.00005; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("cache_read_cost = %.12f, want 0.00005", *model.CacheReadCost)
 	}
 }
 
