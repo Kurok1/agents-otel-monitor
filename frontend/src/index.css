@@ -1307,7 +1307,22 @@ body[data-theme="dark"] .heatmap-cell[data-level="0"] { fill: var(--bg-alt); }
   color: var(--fg-3);
   display: flex;
   font-size: 11px;
+  gap: 16px;
   justify-content: space-between;
+}
+
+.pricing-load-more {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.pricing-load-more-error {
+  color: var(--color-error);
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .load-more-btn {
@@ -1334,9 +1349,20 @@ body[data-theme="dark"] .heatmap-cell[data-level="0"] { fill: var(--bg-alt); }
 
 @media (max-width: 720px) {
   .pricing-page-head,
-  .pricing-toolbar {
+  .pricing-toolbar,
+  .pricing-footer {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .pricing-load-more {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .pricing-load-more-error {
+    max-width: 100%;
+    white-space: normal;
   }
 
   .pricing-search {

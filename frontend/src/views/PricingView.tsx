@@ -51,6 +51,7 @@ export function PricingView({ refreshKey }: Props) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const requestSequence = useRef(0);
 
   useEffect(() => {
@@ -70,6 +71,8 @@ export function PricingView({ refreshKey }: Props) {
       .then(response => {
         if (cancelled || sequence !== requestSequence.current) return;
         setError(null);
+        setLoadingMore(false);
+        setLoadMoreError(null);
         setRows(response.models);
         setMeta({
           enabled: response.enabled,
@@ -81,6 +84,8 @@ export function PricingView({ refreshKey }: Props) {
       })
       .catch(err => {
         if (cancelled || sequence !== requestSequence.current) return;
+        setLoadingMore(false);
+        setLoadMoreError(null);
         setRows([]);
         setMeta(null);
         setError(String(err));
@@ -100,6 +105,7 @@ export function PricingView({ refreshKey }: Props) {
     if (scope !== 'catalog' || loadingMore || !meta) return;
     const sequence = requestSequence.current;
     setLoadingMore(true);
+    setLoadMoreError(null);
     Pricing.catalog(prefix, rows.length, PAGE_SIZE)
       .then(response => {
         if (sequence !== requestSequence.current) return;
@@ -109,7 +115,9 @@ export function PricingView({ refreshKey }: Props) {
           : current);
       })
       .catch(err => {
-        if (sequence === requestSequence.current) setError(String(err));
+        if (sequence === requestSequence.current) {
+          setLoadMoreError(String(err));
+        }
       })
       .finally(() => {
         if (sequence === requestSequence.current) setLoadingMore(false);
@@ -126,6 +134,7 @@ export function PricingView({ refreshKey }: Props) {
     setLoading(true);
     setLoadingMore(false);
     setError(null);
+    setLoadMoreError(null);
     setScope(next);
   };
 
@@ -241,15 +250,26 @@ export function PricingView({ refreshKey }: Props) {
               <span>
                 已显示 {rows.length.toLocaleString()} / {meta.totalMatches.toLocaleString()}
               </span>
-              {hasMore && (
-                <button
-                  className="load-more-btn"
-                  disabled={loadingMore}
-                  onClick={loadMore}
-                >
-                  {loadingMore ? '加载中…' : `再加载 ${PAGE_SIZE} 条`}
-                </button>
-              )}
+              <div className="pricing-load-more">
+                {loadMoreError && (
+                  <span className="pricing-load-more-error" role="alert">
+                    加载更多失败：{loadMoreError}
+                  </span>
+                )}
+                {hasMore && (
+                  <button
+                    className="load-more-btn"
+                    disabled={loadingMore}
+                    onClick={loadMore}
+                  >
+                    {loadingMore
+                      ? '加载中…'
+                      : loadMoreError
+                        ? '重试加载'
+                        : `再加载 ${PAGE_SIZE} 条`}
+                  </button>
+                )}
+              </div>
             </div>
             <div className="card-sub">
               注：Claude 实际成本以客户端自报为准，此表仅为参考单价；“未收录”表示该模型不在当前计价表中。
