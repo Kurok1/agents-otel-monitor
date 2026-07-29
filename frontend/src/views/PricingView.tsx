@@ -48,10 +48,14 @@ export function PricingView({ refreshKey }: Props) {
   const [prefix, setPrefix] = useState('');
   const [rows, setRows] = useState<PriceRow[]>([]);
   const [meta, setMeta] = useState<Meta | null>(null);
-  const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
+  const requestKey = JSON.stringify([scope, prefix, refreshKey]);
+  const [completedRequestKey, setCompletedRequestKey] = useState<string | null>(
+    null,
+  );
+  const loading = completedRequestKey !== requestKey;
   const requestSequence = useRef(0);
 
   useEffect(() => {
@@ -81,6 +85,7 @@ export function PricingView({ refreshKey }: Props) {
             ? response.total_matches
             : response.models.length,
         });
+        setCompletedRequestKey(requestKey);
       })
       .catch(err => {
         if (cancelled || sequence !== requestSequence.current) return;
@@ -89,20 +94,16 @@ export function PricingView({ refreshKey }: Props) {
         setRows([]);
         setMeta(null);
         setError(String(err));
-      })
-      .finally(() => {
-        if (!cancelled && sequence === requestSequence.current) {
-          setLoading(false);
-        }
+        setCompletedRequestKey(requestKey);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [prefix, refreshKey, scope]);
+  }, [prefix, refreshKey, requestKey, scope]);
 
   const loadMore = () => {
-    if (scope !== 'catalog' || loadingMore || !meta) return;
+    if (scope !== 'catalog' || loading || loadingMore || !meta) return;
     const sequence = requestSequence.current;
     setLoadingMore(true);
     setLoadMoreError(null);
@@ -126,12 +127,12 @@ export function PricingView({ refreshKey }: Props) {
 
   const hasMore =
     scope === 'catalog' &&
+    !loading &&
     meta != null &&
     rows.length < meta.totalMatches;
 
   const selectScope = (next: Scope) => {
     if (next === scope) return;
-    setLoading(true);
     setLoadingMore(false);
     setError(null);
     setLoadMoreError(null);
@@ -166,7 +167,7 @@ export function PricingView({ refreshKey }: Props) {
           <div>
             <h3>{scope === 'used' ? '实际使用过的模型' : '完整模型目录'}</h3>
             <div className="card-sub">
-              {meta
+              {!loading && meta
                 ? `${meta.totalMatches.toLocaleString()} 个匹配 · 计价表共 ${meta.tableEntries.toLocaleString()} 条`
                 : '读取计价表…'}
             </div>
@@ -183,8 +184,10 @@ export function PricingView({ refreshKey }: Props) {
           </label>
         </div>
 
-        {error && <div className="pricing-state">加载失败：{error}</div>}
-        {loading && !error && <div className="pricing-state">加载中…</div>}
+        {!loading && error && (
+          <div className="pricing-state">加载失败：{error}</div>
+        )}
+        {loading && <div className="pricing-state">加载中…</div>}
         {!loading && !error && meta && !meta.enabled && (
           <div className="pricing-state">
             在服务端 config.yaml 中开启 <code>pricing.enabled</code> 并配置{' '}
