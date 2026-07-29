@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -49,6 +50,12 @@ type Stats struct {
 	LastRefreshSource string
 	LastRefreshOK     bool
 	Unmatched         map[string]int64
+}
+
+// PriceEntry is one named row from the current in-memory price table.
+type PriceEntry struct {
+	Model string
+	Price ModelPrice
 }
 
 // NewEngine constructs the engine. When enabled it synchronously loads
@@ -141,6 +148,43 @@ func (e *Engine) PriceFor(model string) (ModelPrice, bool) {
 		return ModelPrice{}, false
 	}
 	return (*tbl).lookup(model)
+}
+
+// SearchPrices returns one stable, alphabetically sorted page from the live
+// price table. Prefix matching is case-insensitive and surrounding whitespace
+// is ignored. The total is calculated before pagination.
+func (e *Engine) SearchPrices(prefix string, offset, limit int) ([]PriceEntry, int) {
+	if !e.enabled {
+		return []PriceEntry{}, 0
+	}
+	tbl := e.table.Load()
+	if tbl == nil {
+		return []PriceEntry{}, 0
+	}
+
+	matches := make([]PriceEntry, 0)
+	for model, price := range *tbl {
+		if !MatchesModelPrefix(model, prefix) {
+			continue
+		}
+		matches = append(matches, PriceEntry{Model: model, Price: price})
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].Model < matches[j].Model
+	})
+
+	total := len(matches)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset >= total {
+		return []PriceEntry{}, total
+	}
+	end := total
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+	return matches[offset:end], total
 }
 
 func (e *Engine) recordUnmatched(model string) {

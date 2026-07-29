@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kuroky/claude-code-monitor/internal/config"
+	"github.com/kuroky/claude-code-monitor/internal/pricing"
 	"github.com/kuroky/claude-code-monitor/internal/store"
 )
 
@@ -458,6 +459,43 @@ func TestMergeModelGroups_FoldsClaudeVariants(t *testing.T) {
 	}
 }
 
+func TestModelCostBreakdownPreservesIndependentlyAvailableComponents(t *testing.T) {
+	c, err := NewClassifier(nil)
+	if err != nil {
+		t.Fatalf("NewClassifier: %v", err)
+	}
+	tokens := []modelTokens{{
+		Model:       "gpt-partial-price",
+		TokensIn:    800,
+		TokensOut:   500,
+		CacheTokens: 200,
+	}}
+	attachModelCostBreakdowns(tokens, fakePriceLookup{table: map[string]pricing.ModelPrice{
+		"gpt-partial-price": {
+			InputCostPerToken:       f64(1e-6),
+			CacheReadInputTokenCost: f64(0.25e-6),
+		},
+	}}, true)
+
+	got := mergeModelGroups(c, tokens, nil, nil)
+	if len(got) != 1 {
+		t.Fatalf("groups = %+v, want one model group", got)
+	}
+	model := got[0]
+	if model.InputCost == nil || *model.InputCost < 0.0008-1e-12 || *model.InputCost > 0.0008+1e-12 {
+		t.Errorf("input_cost = %v, want 0.0008", model.InputCost)
+	}
+	if model.CacheReadCost == nil || *model.CacheReadCost < 0.00005-1e-12 || *model.CacheReadCost > 0.00005+1e-12 {
+		t.Errorf("cache_read_cost = %v, want 0.00005", model.CacheReadCost)
+	}
+	if model.OutputCost != nil {
+		t.Errorf("output_cost = %v, want unavailable", model.OutputCost)
+	}
+	if !model.CostBreakdownEstimated {
+		t.Error("cost_breakdown_estimated = false, want true when any component is estimated")
+	}
+}
+
 func insertCodexCostRow(t *testing.T, db *sql.DB, ts time.Time, model string, cost sql.NullFloat64) {
 	t.Helper()
 	_, err := db.Exec(`
@@ -498,18 +536,18 @@ func TestSnapshotCostEstimatedFlag(t *testing.T) {
 	ctx := context.Background()
 	c, _ := NewClassifier(nil)
 
-	claude, err := BuildSnapshot(ctx, db, c, w, "day", ClientClaude, true)
+	claude, err := BuildSnapshot(ctx, db, c, w, "day", ClientClaude, true, nil)
 	if err != nil {
 		t.Fatalf("claude snapshot: %v", err)
 	}
 	if claude.Cost.Estimated {
 		t.Fatal("claude view must not be flagged estimated")
 	}
-	codexOn, _ := BuildSnapshot(ctx, db, c, w, "day", ClientCodex, true)
+	codexOn, _ := BuildSnapshot(ctx, db, c, w, "day", ClientCodex, true, nil)
 	if !codexOn.Cost.Estimated {
 		t.Fatal("codex view with pricing enabled must be estimated")
 	}
-	codexOff, _ := BuildSnapshot(ctx, db, c, w, "day", ClientCodex, false)
+	codexOff, _ := BuildSnapshot(ctx, db, c, w, "day", ClientCodex, false, nil)
 	if codexOff.Cost.Estimated {
 		t.Fatal("codex view with pricing disabled must not be estimated")
 	}

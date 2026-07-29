@@ -121,3 +121,26 @@ func TestPriceForDisabled(t *testing.T) {
 		t.Fatal("disabled engine: want ok=false")
 	}
 }
+
+func TestSearchPricesUsesCaseInsensitivePrefixAndPagination(t *testing.T) {
+	path := writeTempJSON(t, `{
+		"gpt-5.6-terra":{"input_cost_per_token":0.0000025,"output_cost_per_token":0.000015},
+		"claude-opus-4-8":{"input_cost_per_token":0.000005,"output_cost_per_token":0.000025},
+		"gpt-5.6-sol":{"input_cost_per_token":0.000005,"output_cost_per_token":0.00003}
+	}`)
+	e, err := NewEngine(config.PricingConfig{Enabled: true, SourceFile: path}, nil)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+
+	got, total := e.SearchPrices(" GPT-5.6 ", 1, 1)
+	if total != 2 {
+		t.Fatalf("total = %d, want 2", total)
+	}
+	if len(got) != 1 || got[0].Model != "gpt-5.6-terra" {
+		t.Fatalf("page = %+v, want second alphabetic GPT-5.6 model", got)
+	}
+	if got[0].Price.InputCostPerToken == nil || *got[0].Price.InputCostPerToken != 0.0000025 {
+		t.Fatalf("price = %+v, want terra input rate", got[0].Price)
+	}
+}

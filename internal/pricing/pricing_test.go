@@ -63,6 +63,59 @@ func TestCostSubsetSemantics(t *testing.T) {
 	}
 }
 
+func TestCostBreakdownSeparatesInputOutputAndCacheRead(t *testing.T) {
+	p := ModelPrice{
+		InputCostPerToken:           ptr(1e-6),
+		OutputCostPerToken:          ptr(2e-6),
+		CacheReadInputTokenCost:     ptr(0.25e-6),
+		OutputCostPerReasoningToken: ptr(3e-6),
+	}
+
+	got, ok := p.CostBreakdown(TokenCounts{
+		Input:     1000,
+		Output:    500,
+		Cached:    200,
+		Reasoning: 100,
+	})
+	if !ok {
+		t.Fatal("expected priceable breakdown")
+	}
+	if diff := got.Input - 0.0008; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("input cost = %v, want 0.0008", got.Input)
+	}
+	if diff := got.CacheRead - 0.00005; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("cache-read cost = %v, want 0.00005", got.CacheRead)
+	}
+	if diff := got.Output - 0.0011; diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("output cost = %v, want 0.0011 including reasoning", got.Output)
+	}
+}
+
+func TestCostBreakdownKeepsAvailableComponentsWhenCoreRateIsMissing(t *testing.T) {
+	p := ModelPrice{
+		InputCostPerToken:       ptr(1e-6),
+		CacheReadInputTokenCost: ptr(0.25e-6),
+	}
+
+	got, complete := p.CostBreakdown(TokenCounts{
+		Input:  1000,
+		Output: 500,
+		Cached: 200,
+	})
+	if complete {
+		t.Fatal("breakdown with no output rate must not be complete")
+	}
+	if diff := got.Input - 0.0008; !got.InputAvailable || diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("input component = (%v, %v), want available 0.0008", got.InputAvailable, got.Input)
+	}
+	if diff := got.CacheRead - 0.00005; !got.CacheReadAvailable || diff > 1e-12 || diff < -1e-12 {
+		t.Errorf("cache-read component = (%v, %v), want available 0.00005", got.CacheReadAvailable, got.CacheRead)
+	}
+	if got.OutputAvailable {
+		t.Errorf("output component = (%v, %v), want unavailable", got.OutputAvailable, got.Output)
+	}
+}
+
 func TestCacheRateNilFallsBackButZeroDoesNot(t *testing.T) {
 	// nil cache rate → cached billed at input rate.
 	pNil := ModelPrice{InputCostPerToken: ptr(1e-6), OutputCostPerToken: ptr(1e-6)}

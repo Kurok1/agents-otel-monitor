@@ -13,6 +13,7 @@ import { formatCurrency, formatPct, formatTokens } from './lib/format';
 import { TOOL_PALETTE, SKILL_PALETTE } from './lib/palette';
 import { SessionsView } from './views/SessionsView';
 import { SessionDetailView } from './views/SessionDetailView';
+import { PricingView } from './views/PricingView';
 
 function useAnimated(target: number, duration = 700): number {
   const [val, setVal] = useState(0);
@@ -98,6 +99,7 @@ function KpiCard({ icon, label, value, unit, delta, foot, sparkValues, sparkColo
 type View =
   | { name: 'dashboard' }
   | { name: 'sessions' }
+  | { name: 'pricing' }
   | { name: 'session'; id: string; client: 'claude' | 'codex' };
 
 export default function App() {
@@ -216,10 +218,16 @@ export default function App() {
               仪表盘
             </button>
             <button
-              data-on={view.name !== 'dashboard'}
+              data-on={view.name === 'sessions' || view.name === 'session'}
               onClick={() => setView({ name: 'sessions' })}
             >
               会话
+            </button>
+            <button
+              data-on={view.name === 'pricing'}
+              onClick={() => setView({ name: 'pricing' })}
+            >
+              模型价格
             </button>
           </nav>
           <span className="spacer" />
@@ -267,6 +275,9 @@ export default function App() {
         onBack={() => setView({ name: 'sessions' })}
       />
     );
+  }
+  if (view.name === 'pricing') {
+    return renderShell(<PricingView refreshKey={refreshKey} />);
   }
 
   if (!data) {
@@ -316,6 +327,10 @@ export default function App() {
   const tokenDelta = pctDelta(data.tokens.total, data.tokens.prev_total);
   const costDelta = pctDelta(data.cost.total, data.cost.prev_total);
   const requestsDelta = pctDelta(data.requests.total, data.requests.prev_total);
+  const formatComponentCost = (value: number | null): string => {
+    if (value == null) return '—';
+    return `≈ ${formatCurrency(value, value > 0 && value < 0.01 ? 4 : 2)}`;
+  };
 
   const RATES_WINDOW_LABEL: Record<Range, string> = {
     day: '近 48 小时 · 每小时',
@@ -348,12 +363,6 @@ export default function App() {
       : client === 'claude'
         ? '请求耗时加权平均'
         : '客户端原生口径';
-
-  // 单价格式化:>=1 保留两位;<1 保留两位有效数字(如 $0.075);null → —
-  const fmtPrice = (v: number | null): string => {
-    if (v == null) return '—';
-    return '$' + (v >= 1 ? v.toFixed(2) : v.toPrecision(2));
-  };
 
   return renderShell(
     <main className="page">
@@ -686,9 +695,9 @@ export default function App() {
               <tr>
                 <th>模型</th>
                 <th className="num">请求数</th>
-                <th className="num">输入 Tokens</th>
-                <th className="num">输出 Tokens</th>
-                <th className="num">缓存读取</th>
+                <th className="num">输入 Tokens / 费用</th>
+                <th className="num">输出 Tokens / 费用</th>
+                <th className="num">缓存读取 / 费用</th>
                 {(client !== 'codex' || data.cost.cost_estimated) && <th className="num">费用</th>}
                 <th className="num" style={{ minWidth: 140 }}>
                   占比
@@ -708,9 +717,24 @@ export default function App() {
                     </div>
                   </td>
                   <td className="num">{m.requests.toLocaleString()}</td>
-                  <td className="num">{formatTokens(m.tokens_in)}</td>
-                  <td className="num">{formatTokens(m.tokens_out)}</td>
-                  <td className="num">{formatTokens(m.cache_tokens)}</td>
+                  <td className="num">
+                    <div className="token-cost-cell">
+                      <span>{formatTokens(m.tokens_in)}</span>
+                      <small>{formatComponentCost(m.input_cost)}</small>
+                    </div>
+                  </td>
+                  <td className="num">
+                    <div className="token-cost-cell">
+                      <span>{formatTokens(m.tokens_out)}</span>
+                      <small>{formatComponentCost(m.output_cost)}</small>
+                    </div>
+                  </td>
+                  <td className="num">
+                    <div className="token-cost-cell">
+                      <span>{formatTokens(m.cache_tokens)}</span>
+                      <small>{formatComponentCost(m.cache_read_cost)}</small>
+                    </div>
+                  </td>
                   {(client !== 'codex' || data.cost.cost_estimated) && (
                     <td className="num">
                       <strong>{formatCurrency(m.cost)}</strong>
@@ -728,80 +752,9 @@ export default function App() {
               ))}
             </tbody>
           </table>
-        </section>
-
-        <section className="card">
-          <div className="card-head">
-            <div>
-              <h3>模型价目表</h3>
-              <div className="card-sub">
-                {data.pricing.enabled
-                  ? `实际使用过的模型 · 单价 $ / 1M tokens · LiteLLM 计价表（${data.pricing.tableEntries.toLocaleString()} 条）`
-                  : '未启用成本估算'}
-              </div>
-            </div>
+          <div className="card-sub model-cost-note">
+            分项费用按当前模型价目表估算；Claude 总费用以客户端上报为准，可能与分项之和不同。
           </div>
-          {data.pricing.enabled ? (
-            <>
-              <table className="model-table">
-                <thead>
-                  <tr>
-                    <th>模型</th>
-                    <th>客户端</th>
-                    <th className="num">输入</th>
-                    <th className="num">输出</th>
-                    <th className="num">缓存读</th>
-                    <th className="num">推理输出</th>
-                    <th className="num">最近使用</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.pricing.models.map(m => (
-                    <tr key={m.model}>
-                      <td>
-                        <div className="model-name" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}>
-                          {m.model}
-                          {!m.matched && (
-                            <span className="model-tier" style={{ display: 'inline', marginLeft: 8 }}>
-                              未收录
-                            </span>
-                          )}
-                        </div>
-                      </td>
-                      <td>
-                        {m.clients.map(c => (
-                          <span
-                            key={c}
-                            className={c === 'codex' ? 'client-badge client-badge--codex' : 'client-badge'}
-                          >
-                            {c === 'codex' ? 'Codex' : 'Claude'}
-                          </span>
-                        ))}
-                      </td>
-                      <td className="num">{fmtPrice(m.input_per_1m)}</td>
-                      <td className="num">{fmtPrice(m.output_per_1m)}</td>
-                      <td className="num">{fmtPrice(m.cache_read_per_1m)}</td>
-                      <td className="num">{fmtPrice(m.reasoning_output_per_1m)}</td>
-                      <td className="num">
-                        {new Date(m.last_seen).toLocaleDateString('zh-CN', {
-                          month: 'numeric',
-                          day: 'numeric',
-                        })}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div className="card-sub">
-                注：Claude 实际成本以客户端自报为准，此表仅为参考单价；「未收录」表示该模型不在计价表中。
-              </div>
-            </>
-          ) : (
-            <div className="card-sub">
-              在服务端 config.yaml 中开启 <code>pricing.enabled</code> 并配置{' '}
-              <code>source_file</code>（参考 config.example.yaml）后，这里会展示实际使用过的模型单价。
-            </div>
-          )}
         </section>
 
       </main>

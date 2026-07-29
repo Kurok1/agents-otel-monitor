@@ -37,6 +37,17 @@ type TokenCounts struct {
 	Tool      int64
 }
 
+// CostBreakdown is the estimated USD cost split by user-facing token class.
+// Reasoning output is included in Output because it is a subset of output.
+type CostBreakdown struct {
+	Input              float64
+	Output             float64
+	CacheRead          float64
+	InputAvailable     bool
+	OutputAvailable    bool
+	CacheReadAvailable bool
+}
+
 // priceTable maps a model name to its rates. Overrides are merged in with
 // higher precedence before the table is published, so a single map suffices.
 type priceTable map[string]ModelPrice
@@ -80,6 +91,14 @@ func parseLiteLLM(data []byte) (priceTable, error) {
 
 var dateSnapshotRe = regexp.MustCompile(`-\d{4}-\d{2}-\d{2}$`)
 
+// MatchesModelPrefix reports whether model starts with prefix after trimming
+// surrounding prefix whitespace. Matching is case-insensitive.
+func MatchesModelPrefix(model, prefix string) bool {
+	normalizedPrefix := strings.ToLower(strings.TrimSpace(prefix))
+	return normalizedPrefix == "" ||
+		strings.HasPrefix(strings.ToLower(model), normalizedPrefix)
+}
+
 // lookup applies the match order: exact, then normalized (strip a `provider/`
 // prefix and a trailing `-YYYY-MM-DD` date snapshot). Precedence between
 // overrides and the base table is already resolved by the merge, so both the
@@ -111,25 +130,48 @@ func nonNeg(x int64) int64 {
 	return x
 }
 
-// cost applies the subset-aware formula. Returns ok=false when the model has no
-// input or output rate (unpriceable).
+// CostBreakdown applies the subset-aware formula and returns every component
+// that can be estimated from the available rates. complete=false means at
+// least one component is unavailable; the other component values remain valid.
+func (p ModelPrice) CostBreakdown(c TokenCounts) (CostBreakdown, bool) {
+	var breakdown CostBreakdown
+	if p.InputCostPerToken != nil {
+		inputRate := *p.InputCostPerToken
+		breakdown.Input = float64(nonNeg(c.Input-c.Cached)) * inputRate
+		breakdown.InputAvailable = true
+		if p.CacheReadInputTokenCost == nil {
+			breakdown.CacheRead = float64(c.Cached) * inputRate
+			breakdown.CacheReadAvailable = true
+		}
+	}
+	if p.CacheReadInputTokenCost != nil {
+		breakdown.CacheRead = float64(c.Cached) * (*p.CacheReadInputTokenCost)
+		breakdown.CacheReadAvailable = true
+	}
+	if p.OutputCostPerToken != nil {
+		outputRate := *p.OutputCostPerToken
+		if p.OutputCostPerReasoningToken != nil {
+			breakdown.Output = float64(nonNeg(c.Output-c.Reasoning))*outputRate +
+				float64(c.Reasoning)*(*p.OutputCostPerReasoningToken)
+		} else {
+			breakdown.Output = float64(c.Output) * outputRate
+		}
+		breakdown.OutputAvailable = true
+	}
+	complete := breakdown.InputAvailable &&
+		breakdown.OutputAvailable &&
+		breakdown.CacheReadAvailable
+	return breakdown, complete
+}
+
+// cost returns the total while sharing the component formula used by the
+// dashboard breakdown.
 func (p ModelPrice) cost(c TokenCounts) (float64, bool) {
-	if p.InputCostPerToken == nil || p.OutputCostPerToken == nil {
+	breakdown, ok := p.CostBreakdown(c)
+	if !ok {
 		return 0, false
 	}
-	inputRate := *p.InputCostPerToken
-	outputRate := *p.OutputCostPerToken
-	cachedRate := inputRate // fall back only when the field is ABSENT
-	if p.CacheReadInputTokenCost != nil {
-		cachedRate = *p.CacheReadInputTokenCost
-	}
-	cost := float64(nonNeg(c.Input-c.Cached))*inputRate + float64(c.Cached)*cachedRate
-	if p.OutputCostPerReasoningToken != nil {
-		cost += float64(nonNeg(c.Output-c.Reasoning))*outputRate + float64(c.Reasoning)*(*p.OutputCostPerReasoningToken)
-	} else {
-		cost += float64(c.Output) * outputRate
-	}
-	return cost, true
+	return breakdown.Input + breakdown.Output + breakdown.CacheRead, true
 }
 
 // merge overlays `over` onto a copy of `base`; keys in `over` win, base-only

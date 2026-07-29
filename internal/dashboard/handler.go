@@ -21,6 +21,7 @@ type Handler struct {
 	classifier     *Classifier
 	pricingEnabled bool
 	prices         PriceLookup
+	priceCatalog   PriceCatalogSource
 	log            *slog.Logger
 }
 
@@ -60,6 +61,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleRealtimeSpeed(w, r)
 	case "/api/pricing/models":
 		h.handlePricingModels(w, r)
+	case "/api/pricing/catalog":
+		h.handlePricingCatalog(w, r)
 	case "/api/sessions":
 		h.handleSessionList(w, r)
 	default:
@@ -87,7 +90,16 @@ func (h *Handler) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	resp, err := BuildSnapshot(r.Context(), h.db, h.classifier, tw, rng, client, h.pricingEnabled)
+	resp, err := BuildSnapshot(
+		r.Context(),
+		h.db,
+		h.classifier,
+		tw,
+		rng,
+		client,
+		h.pricingEnabled,
+		h.prices,
+	)
 	if err != nil {
 		if isUserError(err) {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -238,6 +250,7 @@ func (h *Handler) handleSessionDetail(w http.ResponseWriter, r *http.Request) {
 // SetRootHandler/SetAPIHandler idiom — must be called before serving starts.
 func (h *Handler) SetPriceLookup(p PriceLookup) {
 	h.prices = p
+	h.priceCatalog, _ = p.(PriceCatalogSource)
 }
 
 func (h *Handler) handleRates(w http.ResponseWriter, r *http.Request) {
@@ -297,6 +310,25 @@ func (h *Handler) handlePricingModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	resp.Models = filterPricingModelsByPrefix(resp.Models, r.URL.Query().Get("prefix"))
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) handlePricingCatalog(w http.ResponseWriter, r *http.Request) {
+	const (
+		defaultLimit = 100
+		maxLimit     = 500
+	)
+	limit := parseLimit(r.URL.Query().Get("limit"), defaultLimit, maxLimit)
+	offset := parseOffset(r.URL.Query().Get("offset"))
+	enabled := h.pricingEnabled && h.priceCatalog != nil
+	resp := BuildPricingCatalog(
+		h.priceCatalog,
+		enabled,
+		r.URL.Query().Get("prefix"),
+		offset,
+		limit,
+	)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -312,6 +344,14 @@ func parseLimit(raw string, def, max int) int {
 	}
 	if n > max {
 		return max
+	}
+	return n
+}
+
+func parseOffset(raw string) int {
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0
 	}
 	return n
 }
