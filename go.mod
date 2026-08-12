@@ -5,6 +5,8 @@ go 1.26.2
 require (
 	github.com/marcboeker/go-duckdb/v2 v2.4.3
 	go.opentelemetry.io/proto/otlp v1.10.0
+	golang.org/x/mod v0.32.0
+	golang.org/x/term v0.41.0
 	google.golang.org/grpc v1.81.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
@@ -31,7 +33,6 @@ require (
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	golang.org/x/exp v0.0.0-20250408133849-7e4ce0ab07d0 // indirect
-	golang.org/x/mod v0.32.0 // indirect
 	golang.org/x/net v0.51.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
