@@ -90,7 +90,9 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           NAME="claude-code-monitor_${VERSION}_${{ matrix.target }}"
-          go build -trimpath -ldflags "-s -w" -o "dist/${NAME}/claude-code-monitor${{ matrix.ext }}" ./cmd/server
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/kuroky/claude-code-monitor/internal/buildinfo.version=${VERSION}" \
+            -o "dist/${NAME}/claude-code-monitor${{ matrix.ext }}" ./cmd/server
           cp config.example.yaml "dist/${NAME}/"
           # Bundle the LiteLLM price table so `pricing.source_file: ./pricing/litellm.json`
           # works out of the box from the extracted archive. Fetched at build time
@@ -185,6 +187,7 @@ jobs:
           provenance: false
           build-args: |
             LITELLM_PRICING_URL=${{ env.LITELLM_PRICING_URL }}
+            VERSION=${{ github.ref_name }}
           # push-by-digest emits only an arch-specific manifest blob (no tag).
           # The downstream docker-manifest job stitches them into a multi-arch
           # tag list so the release publishes one logical image, not two.

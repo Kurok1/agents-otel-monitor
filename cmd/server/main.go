@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kuroky/claude-code-monitor/internal/buildinfo"
 	"github.com/kuroky/claude-code-monitor/internal/config"
 	"github.com/kuroky/claude-code-monitor/internal/dashboard"
 	"github.com/kuroky/claude-code-monitor/internal/logging"
@@ -23,40 +26,73 @@ import (
 
 const shutdownTimeout = 30 * time.Second
 
+type commandStreams struct {
+	stdin  io.Reader
+	stdout io.Writer
+	stderr io.Writer
+}
+
+type serverOptions struct {
+	configPath    string
+	skipIfRunning bool
+	noUpdateCheck bool
+}
+
 func main() {
-	if err := run(); err != nil {
+	streams := commandStreams{
+		stdin:  os.Stdin,
+		stdout: os.Stdout,
+		stderr: os.Stderr,
+	}
+	if err := run(context.Background(), os.Args[1:], streams); err != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	var (
-		configPath    string
-		skipIfRunning bool
-	)
-	flag.StringVar(&configPath, "config", "./config.yaml", "path to YAML config file")
-	flag.BoolVar(&skipIfRunning, "skip-if-running", false,
-		"if another instance is already listening on grpc_listen, exit 0 instead of restarting it (used by SessionStart hooks)")
-	flag.Parse()
+func run(ctx context.Context, args []string, streams commandStreams) error {
+	if len(args) == 1 && (args[0] == "version" || args[0] == "--version") {
+		if _, err := fmt.Fprintln(streams.stdout, buildinfo.Version()); err != nil {
+			return fmt.Errorf("write version: %w", err)
+		}
+		return nil
+	}
+	err := runServer(ctx, args, streams)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
+	return err
+}
 
-	cfg, err := config.Load(configPath)
+func runServer(ctx context.Context, args []string, streams commandStreams) error {
+	options, err := parseServerOptions(args, streams.stderr)
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(options.configPath)
 	if err != nil {
 		return err
 	}
 
 	logging.Setup(cfg.Logging)
 
-	// Pre-flight: something is already on grpc_listen.
-	// Default behavior is restart — find the existing PID, SIGTERM it, wait
-	// for the port to free, escalate to SIGKILL if needed. This makes
-	// `./bin/server` reload semantics painless during development.
-	// Hook integrations that want idempotent spawns should pass
-	// `-skip-if-running` instead so duplicate firings are no-ops.
+	// Hook integrations that want idempotent spawns must exit before the
+	// startup update check performs any network access.
+	if options.skipIfRunning && alreadyListening(cfg.Server.GRPCListen) {
+		logSkipIfRunning(cfg.Server.GRPCListen)
+		return nil
+	}
+
+	if startupUpdateEnabled(options, os.Getenv) {
+		maybeApplyStartupUpdate(ctx, args, streams)
+	}
+
+	// Probe after the prompt because an instance that existed before the
+	// update check may have exited while waiting for user confirmation.
 	if alreadyListening(cfg.Server.GRPCListen) {
-		if skipIfRunning {
-			slog.Info("another instance is listening; -skip-if-running set, exiting",
-				"grpc_listen", cfg.Server.GRPCListen)
+		if options.skipIfRunning {
+			logSkipIfRunning(cfg.Server.GRPCListen)
 			return nil
 		}
 		if err := stopExistingInstance(cfg.Server.GRPCListen, slog.Default()); err != nil {
@@ -130,11 +166,11 @@ func run() error {
 		"capture_enabled", cfg.Capture.Enabled,
 	)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	select {
-	case <-ctx.Done():
+	case <-signalCtx.Done():
 		slog.Info("shutdown signal received")
 		srv.Shutdown(shutdownTimeout)
 	case err := <-serveErr:
@@ -156,6 +192,32 @@ func run() error {
 		slog.Error("buffered writer stop", "err", err)
 	}
 	return nil
+}
+
+func parseServerOptions(args []string, stderr io.Writer) (serverOptions, error) {
+	var options serverOptions
+	flags := flag.NewFlagSet("claude-code-monitor", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.StringVar(&options.configPath, "config", "./config.yaml", "path to YAML config file")
+	flags.BoolVar(&options.skipIfRunning, "skip-if-running", false,
+		"if another instance is already listening on grpc_listen, exit 0 instead of restarting it (used by SessionStart hooks)")
+	flags.BoolVar(&options.noUpdateCheck, "no-update-check", false, "skip the startup GitHub release check")
+	if err := flags.Parse(args); err != nil {
+		return serverOptions{}, fmt.Errorf("parse flags: %w", err)
+	}
+	if flags.NArg() != 0 {
+		return serverOptions{}, fmt.Errorf("unexpected command or argument %q", flags.Arg(0))
+	}
+	return options, nil
+}
+
+func startupUpdateEnabled(options serverOptions, getenv func(string) string) bool {
+	return !options.noUpdateCheck && getenv("CLAUDE_CODE_MONITOR_NO_UPDATE_CHECK") != "1"
+}
+
+func logSkipIfRunning(grpcListen string) {
+	slog.Info("another instance is listening; -skip-if-running set, exiting",
+		"grpc_listen", grpcListen)
 }
 
 // alreadyListening reports whether something is already accepting TCP

@@ -73,6 +73,24 @@ grpc server listening  addr=127.0.0.1:4317
 
 浏览器访问 **`http://localhost:9100/`** 即可看到前端看板。**前提**：先在 `frontend/` 跑过 `npm run build`，二进制重新 `go build` 一次（前端产物通过 `//go:embed` 嵌入）。前端没构建时 server 启动日志里会有 `web UI not mounted`，`/` 会回落到原先的纯文本说明页。
 
+### 2.1 版本与启动更新
+
+查看当前二进制版本（不会加载配置、检查更新或启动服务）：
+
+```bash
+./claude-code-monitor version
+# 也支持：./claude-code-monitor --version
+```
+
+官方 GitHub Release 二进制会在服务启动前检查最新稳定版。交互终端发现新版本时显示 `[y/N]`；输入 `y` 后下载当前平台的 `tar.gz`，按 Release 的 `checksums.txt` 校验 SHA-256，在二进制同目录原子替换，然后以原参数、环境和工作目录继续启动新版本。
+
+- 支持 `linux-amd64`、`linux-arm64`、`darwin-arm64`；源码构建默认版本为 `dev`，不会访问 GitHub。
+- 非交互启动（Hook、`nohup`、systemd 等）只打印升级提示，不下载或替换。
+- 检查超时、断网、校验失败或目录无写权限时仅打印 warning，继续启动当前版本；程序不会主动调用 `sudo`。
+- `-skip-if-running` 检测到已有实例时直接退出，不执行更新检查。
+- 可用 `--no-update-check` 或 `CLAUDE_CODE_MONITOR_NO_UPDATE_CHECK=1` 完全关闭启动检查。
+- Docker 镜像默认关闭二进制自更新；请拉取新镜像并重建容器。
+
 **端口已被占用时的默认行为是 restart**：server 启动前会探测 `grpc_listen`，若有其它进程在监听，用 `lsof` 查出 PID 后发 `SIGTERM`，等端口释放（最多 5s），仍未释放则升级为 `SIGKILL`（再等 2s）。开发时反复 `./bin/server` 不需要手动 `pkill`。
 
 如果你希望保持"端口被占用就什么都不做"的幂等语义（典型场景：Claude Code SessionStart hook），加 `-skip-if-running`：

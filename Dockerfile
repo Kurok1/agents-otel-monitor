@@ -32,9 +32,12 @@ COPY . .
 RUN rm -rf internal/web/dist
 COPY --from=frontend-builder /app/internal/web/dist ./internal/web/dist
 
+ARG VERSION=dev
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server
+    go build -trimpath \
+      -ldflags="-s -w -X github.com/kuroky/claude-code-monitor/internal/buildinfo.version=${VERSION}" \
+      -o /out/server ./cmd/server
 
 # Bundle the LiteLLM price table into the image (fetched at build time, NOT
 # vendored in the repo). config.docker.yaml's pricing.source_file points here.
@@ -64,7 +67,8 @@ VOLUME ["/data"]
 # 4317 = OTLP gRPC ingest, 9100 = stats + dashboard API + embedded web UI
 EXPOSE 4317 9100
 
-ENV TZ=Asia/Shanghai
+ENV TZ=Asia/Shanghai \
+    CLAUDE_CODE_MONITOR_NO_UPDATE_CHECK=1
 
 ENTRYPOINT ["/usr/local/bin/server"]
 CMD ["-config", "/etc/claude-code-monitor/config.yaml"]
