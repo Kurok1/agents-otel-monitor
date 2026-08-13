@@ -54,6 +54,7 @@ interface ScopedConnectionStatus {
 export default function App({ api = tauriMonitorApi }: AppProps) {
   const [settings, setSettings] = useState<ConnectionSettings>(defaultConnectionSettings)
   const [theme, setTheme] = useState<ThemeMode>('system')
+  const [themePreview, setThemePreview] = useState<ThemeMode | null>(null)
   const [range, setRange] = useState<UsageRange>('day')
   const [client, setClient] = useState<TelemetryClient>('all')
   const [dataByScope, setDataByScope] = useState<ReadonlyMap<string, DashboardPayload>>(
@@ -70,6 +71,7 @@ export default function App({ api = tauriMonitorApi }: AppProps) {
     ? scopedStatus.connection
     : 'idle'
   const error = scopedStatus?.scope === scope ? scopedStatus.error : ''
+  const activeTheme = themePreview ?? theme
 
   const refresh = useCallback(async () => {
     const currentRequest = ++requestId.current
@@ -102,12 +104,22 @@ export default function App({ api = tauriMonitorApi }: AppProps) {
   }, [api, client, range, scope, settings])
 
   useEffect(() => {
-    if (theme === 'system') {
+    if (activeTheme === 'system') {
       delete document.documentElement.dataset.theme
     } else {
-      document.documentElement.dataset.theme = theme
+      document.documentElement.dataset.theme = activeTheme
     }
+  }, [activeTheme])
+
+  const openSettings = useCallback(() => {
+    setThemePreview(theme)
+    setView('settings')
   }, [theme])
+
+  const cancelSettings = useCallback(() => {
+    setThemePreview(null)
+    setView('dashboard')
+  }, [])
 
   useEffect(() => {
     let disposed = false
@@ -124,7 +136,7 @@ export default function App({ api = tauriMonitorApi }: AppProps) {
       api.listen('panel-shown', () => setPanelVisible(true)),
       api.listen('panel-hidden', () => setPanelVisible(false)),
       api.listen('refresh-requested', () => void refresh()),
-      api.listen('settings-requested', () => setView('settings')),
+      api.listen('settings-requested', openSettings),
     ]).then((listeners) => {
       if (disposed) listeners.forEach((stop) => stop())
       else unlisten.push(...listeners)
@@ -139,7 +151,7 @@ export default function App({ api = tauriMonitorApi }: AppProps) {
       unlisten.forEach((stop) => stop())
       window.removeEventListener('keydown', onKeyDown)
     }
-  }, [api, refresh])
+  }, [api, openSettings, refresh])
 
   useEffect(() => {
     if (!panelVisible) return
@@ -156,6 +168,7 @@ export default function App({ api = tauriMonitorApi }: AppProps) {
       await api.setAutostartEnabled(autostart)
       setSettings(nextSettings)
       setTheme(nextTheme)
+      setThemePreview(null)
       setView('dashboard')
     },
     [api],
@@ -169,8 +182,9 @@ export default function App({ api = tauriMonitorApi }: AppProps) {
           <SettingsView
             api={api}
             settings={settings}
-            theme={theme}
-            onBack={() => setView('dashboard')}
+            theme={activeTheme}
+            onBack={cancelSettings}
+            onThemePreview={setThemePreview}
             onApply={applySettings}
           />
         ) : (
@@ -178,7 +192,7 @@ export default function App({ api = tauriMonitorApi }: AppProps) {
             <PanelHeader
               connection={connection}
               onRefresh={() => void refresh()}
-              onSettings={() => setView('settings')}
+              onSettings={openSettings}
             />
             <div className="panel-scroll">
               <div className="filters" aria-label="数据筛选">
@@ -202,7 +216,7 @@ export default function App({ api = tauriMonitorApi }: AppProps) {
                   loading={connection === 'idle' || connection === 'loading'}
                   error={error}
                   onRetry={() => void refresh()}
-                  onSettings={() => setView('settings')}
+                  onSettings={openSettings}
                 />
               )}
             </div>

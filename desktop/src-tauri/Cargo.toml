@@ -3,7 +3,7 @@
 
 [package]
 name = "vibecoding-monitor"
-version = "3.0.0"
+version = "3.0.1"
 description = "A macOS menu bar dashboard for claude-code-monitor"
 authors = ["Kurok1 <im.kurokyhanc@gmail.com>"]
 edition = "2021"

@@ -87,7 +87,7 @@ grpc server listening  addr=127.0.0.1:4317
 
 ```bash
 curl -s http://127.0.0.1:9100/version
-# {"service":"claude-code-monitor","version":"3.0"}
+# {"service":"claude-code-monitor","version":"3.0.1"}
 ```
 
 查看当前二进制版本（不会加载配置、检查更新或启动服务）：

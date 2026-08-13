@@ -5,7 +5,7 @@
 
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
-  color: #382f29;
+  color: var(--ink);
   background: transparent;
   font-synthesis: none;
   text-rendering: optimizeLegibility;

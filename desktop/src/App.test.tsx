@@ -224,6 +224,31 @@ describe('Vibecoding Monitor panel', () => {
     expect(document.documentElement).toHaveAttribute('data-theme', 'dark')
   })
 
+  it('previews a selected theme immediately and explains how to confirm it', async () => {
+    render(<App api={createApi()} />)
+
+    expect(await screen.findByText('12.84M')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '打开设置' }))
+
+    expect(screen.getByText('选择后即时预览；点击应用确认，取消恢复原主题')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '深色' }))
+
+    expect(document.documentElement).toHaveAttribute('data-theme', 'dark')
+  })
+
+  it('restores the previous theme when a preview is cancelled', async () => {
+    render(<App api={createApi()} />)
+
+    expect(await screen.findByText('12.84M')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '打开设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '深色' }))
+    expect(document.documentElement).toHaveAttribute('data-theme', 'dark')
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+
+    expect(document.documentElement).not.toHaveAttribute('data-theme')
+  })
+
   it('keeps settings open and reports an autostart update failure', async () => {
     const api = createApi({
       setAutostartEnabled: async () => {

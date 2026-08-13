@@ -22,7 +22,7 @@ npm run desktop:build
 
 ## 版本
 
-仓库根目录的 `VERSION` 是项目版本源。当前值 `3.0` 注入后端 `/version`；Cargo、npm 与 macOS bundle 使用对应的 SemVer `3.0.0`。
+仓库根目录的 `VERSION` 是项目版本源。当前值 `3.0.1` 注入后端 `/version`；Cargo、npm 与 macOS bundle 使用对应的 SemVer `3.0.1`。
 
 ## 运行约定
 

@@ -17,12 +17,14 @@ export function SettingsView({
   settings,
   theme,
   onBack,
+  onThemePreview,
   onApply,
 }: {
   api: MonitorApi
   settings: ConnectionSettings
   theme: ThemeMode
   onBack: () => void
+  onThemePreview: (theme: ThemeMode) => void
   onApply: (settings: ConnectionSettings, theme: ThemeMode, autostart: boolean) => Promise<void>
 }) {
   const [host, setHost] = useState(settings.host)
@@ -140,7 +142,7 @@ export function SettingsView({
         <section className="settings-section">
           <div className="settings-title">
             <h2>外观</h2>
-            <p>跟随系统或固定显示模式</p>
+            <p>选择后即时预览；点击应用确认，取消恢复原主题</p>
           </div>
           <SegmentedControl
             ariaLabel="主题"
@@ -150,7 +152,10 @@ export function SettingsView({
               { value: 'dark', label: '深色' },
             ]}
             value={nextTheme}
-            onChange={setNextTheme}
+            onChange={(selectedTheme) => {
+              setNextTheme(selectedTheme)
+              onThemePreview(selectedTheme)
+            }}
           />
         </section>
 
