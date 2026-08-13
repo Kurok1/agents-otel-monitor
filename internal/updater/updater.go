@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"strings"
 
 	"golang.org/x/mod/semver"
 )
@@ -90,8 +91,9 @@ func (u *Updater) Check(ctx context.Context, currentVersion string) (*Available,
 	if !ok {
 		return nil, nil
 	}
-	if !semver.IsValid(currentVersion) {
-		return nil, fmt.Errorf("current version %q is not valid semver", currentVersion)
+	comparableVersion, err := normalizeCurrentVersion(currentVersion)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.latestReleaseURL, nil)
@@ -121,7 +123,7 @@ func (u *Updater) Check(ctx context.Context, currentVersion string) (*Available,
 	if !semver.IsValid(release.TagName) {
 		return nil, fmt.Errorf("latest release tag %q is not valid semver", release.TagName)
 	}
-	if semver.Compare(release.TagName, currentVersion) <= 0 {
+	if semver.Compare(release.TagName, comparableVersion) <= 0 {
 		return nil, nil
 	}
 
@@ -148,6 +150,31 @@ func (u *Updater) Check(ctx context.Context, currentVersion string) (*Available,
 		return nil, fmt.Errorf("validate checksums.txt asset URL: %w", err)
 	}
 	return available, nil
+}
+
+func normalizeCurrentVersion(currentVersion string) (string, error) {
+	version := strings.TrimSpace(currentVersion)
+	if semver.IsValid(version) {
+		return version, nil
+	}
+	if !strings.HasPrefix(version, "v") {
+		version = "v" + version
+	}
+	if semver.IsValid(version) {
+		return version, nil
+	}
+
+	core, suffix := version, ""
+	if index := strings.IndexAny(core, "-+"); index >= 0 {
+		core, suffix = core[:index], core[index:]
+	}
+	if strings.Count(strings.TrimPrefix(core, "v"), ".") == 1 {
+		version = core + ".0" + suffix
+		if semver.IsValid(version) {
+			return version, nil
+		}
+	}
+	return "", fmt.Errorf("current version %q is not valid semver", currentVersion)
 }
 
 func (u *Updater) do(req *http.Request) (*http.Response, error) {

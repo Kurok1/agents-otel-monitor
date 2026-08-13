@@ -1,0 +1,23 @@
+<!--
+  @author Kurok1 <im.kurokyhanc@gmail.com>
+  @since 3.0.0
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" rx="224" fill="#c96442"/>
+  <path
+    d="M272 362 512 220l240 142v300L512 804 272 662V362Z"
+    fill="none"
+    stroke="#faf9f5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="58"
+  />
+  <path
+    d="m384 450 128 76 128-76M512 526v164"
+    fill="none"
+    stroke="#faf9f5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    stroke-width="58"
+  />
+</svg>

@@ -16,8 +16,30 @@ env:
   LITELLM_PRICING_URL: https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
 
 jobs:
+  validate-version:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Match tag to VERSION
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_version="$(tr -d '[:space:]' < VERSION)"
+          semver="${project_version#v}"
+          if [[ "${semver}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            semver="${semver}.0"
+          fi
+          expected_tag="v${semver}"
+          if [[ "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "release tag ${GITHUB_REF_NAME} does not match VERSION ${project_version} (${expected_tag})" >&2
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: validate-version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -85,13 +107,14 @@ jobs:
           CGO_ENABLED: '1'
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          VERSION: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          PROJECT_VERSION="$(tr -d '[:space:]' < VERSION)"
           mkdir -p dist
-          NAME="claude-code-monitor_${VERSION}_${{ matrix.target }}"
+          NAME="claude-code-monitor_${RELEASE_TAG}_${{ matrix.target }}"
           go build -trimpath \
-            -ldflags "-s -w -X github.com/kuroky/claude-code-monitor/internal/buildinfo.version=${VERSION}" \
+            -ldflags "-s -w -X github.com/kuroky/claude-code-monitor/internal/buildinfo.version=${PROJECT_VERSION}" \
             -o "dist/${NAME}/claude-code-monitor${{ matrix.ext }}" ./cmd/server
           cp config.example.yaml "dist/${NAME}/"
           # Bundle the LiteLLM price table so `pricing.source_file: ./pricing/litellm.json`
@@ -148,6 +171,7 @@ jobs:
 
   docker-build:
     name: Docker ${{ matrix.arch }}
+    needs: validate-version
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -187,7 +211,6 @@ jobs:
           provenance: false
           build-args: |
             LITELLM_PRICING_URL=${{ env.LITELLM_PRICING_URL }}
-            VERSION=${{ github.ref_name }}
           # push-by-digest emits only an arch-specific manifest blob (no tag).
           # The downstream docker-manifest job stitches them into a multi-arch
           # tag list so the release publishes one logical image, not two.

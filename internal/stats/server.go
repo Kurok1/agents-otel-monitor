@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kuroky/claude-code-monitor/internal/buildinfo"
 	"github.com/kuroky/claude-code-monitor/internal/config"
 	"github.com/kuroky/claude-code-monitor/internal/pricing"
 	"github.com/kuroky/claude-code-monitor/internal/store"
@@ -59,15 +61,11 @@ func (s *Server) SetAPIHandler(h http.Handler) {
 	s.apiHandler = h
 }
 
-// Start binds the HTTP listener in a goroutine. When cfg.Listen is empty the
-// stats server is treated as disabled and Start is a no-op.
-func (s *Server) Start() error {
-	if s.cfg.Listen == "" {
-		s.log.Info("stats server disabled (empty listen)")
-		return nil
-	}
-
+// Handler returns the complete HTTP surface served by Start. Exposing the
+// composed handler keeps endpoint behavior testable without binding a port.
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/version", s.handleVersion)
 	mux.HandleFunc("/internal/healthz", s.handleHealth)
 	mux.HandleFunc("/internal/stats", s.handleStats)
 	if s.apiHandler != nil {
@@ -86,10 +84,20 @@ func (s *Server) Start() error {
 		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
+	return mux
+}
+
+// Start binds the HTTP listener in a goroutine. When cfg.Listen is empty the
+// stats server is treated as disabled and Start is a no-op.
+func (s *Server) Start() error {
+	if s.cfg.Listen == "" {
+		s.log.Info("stats server disabled (empty listen)")
+		return nil
+	}
 
 	s.srv = &http.Server{
 		Addr:              s.cfg.Listen,
-		Handler:           mux,
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -105,6 +113,24 @@ func (s *Server) Start() error {
 		}
 	}()
 	return nil
+}
+
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(struct {
+		Service string `json:"service"`
+		Version string `json:"version"`
+	}{
+		Service: "claude-code-monitor",
+		Version: buildinfo.Version(),
+	}); err != nil {
+		s.log.Error("encode version response", "err", err)
+	}
 }
 
 // Shutdown stops the HTTP listener with the provided context timeout.
