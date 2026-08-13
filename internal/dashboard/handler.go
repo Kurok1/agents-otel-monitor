@@ -13,7 +13,7 @@ import (
 	"github.com/kuroky/claude-code-monitor/internal/config"
 )
 
-// Handler exposes /api/usage/{snapshot,trends,rankings,heatmap,rates}.
+// Handler exposes /api/usage/{snapshot,models,trends,rankings,heatmap,rates}.
 // All endpoints serve JSON and short-cache via `Cache-Control: private, max-age=30`.
 type Handler struct {
 	db             *sql.DB
@@ -49,6 +49,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/usage/snapshot":
 		h.handleSnapshot(w, r)
+	case "/api/usage/models":
+		h.handleModels(w, r)
 	case "/api/usage/trends":
 		h.handleTrends(w, r)
 	case "/api/usage/rankings":
@@ -72,6 +74,40 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusNotFound, "not found")
 	}
+}
+
+func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
+	rng := r.URL.Query().Get("range")
+	if rng == "" {
+		rng = "day"
+	}
+	client, err := ParseClient(r.URL.Query().Get("client"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	tw, err := NowWindow(time.Now(), h.cfg.Timezone)
+	if err != nil {
+		h.log.Error("models: build time window", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	resp, err := BuildPeriodModels(r.Context(), h.db, h.classifier, PeriodModelsOptions{
+		Window:         tw,
+		Range:          rng,
+		Client:         client,
+		PricingEnabled: h.pricingEnabled,
+	})
+	if err != nil {
+		if isUserError(err) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		h.log.Error("models: build", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) handleSnapshot(w http.ResponseWriter, r *http.Request) {

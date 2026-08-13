@@ -32,11 +32,12 @@ COPY . .
 RUN rm -rf internal/web/dist
 COPY --from=frontend-builder /app/internal/web/dist ./internal/web/dist
 
-ARG VERSION=dev
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath \
-      -ldflags="-s -w -X github.com/kuroky/claude-code-monitor/internal/buildinfo.version=${VERSION}" \
+    PROJECT_VERSION="$(tr -d '[:space:]' < VERSION)" \
+    && test -n "${PROJECT_VERSION}" \
+    && go build -trimpath \
+      -ldflags="-s -w -X github.com/kuroky/claude-code-monitor/internal/buildinfo.version=${PROJECT_VERSION}" \
       -o /out/server ./cmd/server
 
 # Bundle the LiteLLM price table into the image (fetched at build time, NOT

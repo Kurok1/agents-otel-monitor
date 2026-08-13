@@ -47,7 +47,15 @@ go build -o bin/server ./cmd/server
 ./scripts/build-all.sh
 ```
 
-脚本内部依次：`npm install && npm run build`（产物写入 `internal/web/dist/`）→ `go build -trimpath -o bin/server ./cmd/server`（用 `//go:embed` 嵌入 dist）。
+脚本内部依次：`npm install && npm run build`（产物写入 `internal/web/dist/`）→ 读取根目录 `VERSION` → 通过 linker flag 注入版本并执行 `go build`（用 `//go:embed` 嵌入 dist）。直接执行普通 `go build` 时版本仍为 `dev`。
+
+仅 macOS 的菜单栏看板位于独立的 [`desktop/`](desktop/README.md) 项目中：
+
+```bash
+cd desktop
+npm ci
+npm run desktop:build
+```
 
 ### 2. 启动 server
 
@@ -69,11 +77,18 @@ grpc server listening  addr=127.0.0.1:4317
 | 端口 | 协议 | 用途 |
 |---|---|---|
 | `4317` | gRPC (HTTP/2) | Claude Code / Codex OTLP 接收，**不要用浏览器访问** |
-| `9100` | HTTP/1.1 | Web UI（`/`）+ 查询 API（`/api/usage/*`）+ stats（`/internal/*`）+ pprof（`/debug/pprof/*`） |
+| `9100` | HTTP/1.1 | Web UI（`/`）+ 查询 API（`/api/usage/*`）+ 版本（`/version`）+ stats（`/internal/*`）+ pprof（`/debug/pprof/*`） |
 
 浏览器访问 **`http://localhost:9100/`** 即可看到前端看板。**前提**：先在 `frontend/` 跑过 `npm run build`，二进制重新 `go build` 一次（前端产物通过 `//go:embed` 嵌入）。前端没构建时 server 启动日志里会有 `web UI not mounted`，`/` 会回落到原先的纯文本说明页。
 
 ### 2.1 版本与启动更新
+
+根目录 `VERSION` 是项目版本源；`./scripts/build-all.sh` 会把它注入二进制。服务运行后可读取同一个版本：
+
+```bash
+curl -s http://127.0.0.1:9100/version
+# {"service":"claude-code-monitor","version":"3.0"}
+```
 
 查看当前二进制版本（不会加载配置、检查更新或启动服务）：
 

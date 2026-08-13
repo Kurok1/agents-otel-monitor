@@ -71,6 +71,30 @@ type ModelBlock struct {
 	Share                  float64  `json:"share"`
 }
 
+// PeriodModelsResponse → GET /api/usage/models?range=&client=
+//
+// Unlike SnapshotResponse.Models, every row is restricted to the requested
+// current calendar period. TotalTokens and Share intentionally use only
+// input + output tokens; cache counters do not participate in this compact
+// menu-bar view.
+type PeriodModelsResponse struct {
+	UpdatedAt     string             `json:"updated_at"`
+	Range         string             `json:"range"`
+	Client        Client             `json:"client"`
+	CostEstimated bool               `json:"cost_estimated"`
+	Models        []PeriodModelBlock `json:"models"`
+}
+
+type PeriodModelBlock struct {
+	Model        string  `json:"model"`
+	Requests     int64   `json:"requests"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	TotalTokens  int64   `json:"total_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+	Share        float64 `json:"share"`
+}
+
 // TrendsResponse → GET /api/usage/trends?range=
 //
 // `Groups` enumerates the legend order (descending by total tokens across

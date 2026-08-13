@@ -254,3 +254,17 @@ for _, row := range rows {
 | Codex `tool_result` 原文只存长度 | Codex 默认不脱敏且无客户端开关，敏感内容不落盘 |
 | Codex 接 6 个核心 Logs 事件及 Dashboard 所需的 Skill / service TBT Metrics | Skill 用 monotonic DELTA Sum；TBT 用 DELTA Histogram 且只保存 count/sum，不展开 bucket；其余高容量 metrics 与 sandbox / network_proxy 等事件无 Dashboard 需求 |
 | Codex/第三方成本由 `internal/pricing` 在 ingest 时按 LiteLLM 计价表**估算** `cost_usd`（v2.4.0，反转早期「不估算」非目标）；Claude 仍用自报权威成本 | Codex 不上报 cost；用外部计价表估算填补，默认关闭零影响，单价写入时冻结不回填（见 spec/plan 2026-07-02-third-party-cost-estimation） |
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs use local Markdown under `.scratch/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The canonical Matt triage labels are used unchanged. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses the single-context domain-doc layout. See `docs/agents/domain.md`.

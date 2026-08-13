@@ -50,6 +50,30 @@ func TestCheckFindsLatestStableReleaseForCurrentPlatform(t *testing.T) {
 	}
 }
 
+func TestCheckAcceptsMajorMinorVersionFromVersionFile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		writeHTTPResponse(t, w, []byte(`{
+			"tag_name":"v3.0.0",
+			"draft":false,
+			"prerelease":false,
+			"assets":[]
+		}`))
+	}))
+	t.Cleanup(server.Close)
+
+	available, err := testUpdater(server.Client(), server.URL, false).Check(
+		context.Background(),
+		"3.0",
+	)
+	if err != nil {
+		t.Fatalf("check VERSION-style current version: %v", err)
+	}
+	if available != nil {
+		t.Fatalf("available = %+v, want nil for equivalent v3.0.0 release", available)
+	}
+}
+
 func TestCheckRejectsHTTPSRedirectToHTTPBeforeFollowing(t *testing.T) {
 	insecureRequested := false
 	insecureServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
