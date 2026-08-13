@@ -92,6 +92,48 @@ describe('Vibecoding Monitor panel', () => {
     expect(screen.getByText(/上次更新/)).toBeVisible()
   })
 
+  it('does not reuse data from another client when the new scope fails', async () => {
+    const api = createApi({
+      fetchDashboard: async (_settings, _range, client) => {
+        if (client === 'all') return dashboard
+        throw new Error('codex scope unavailable')
+      },
+    })
+    render(<App api={api} />)
+
+    expect(await screen.findByText('12.84M')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Codex' }))
+
+    expect(await screen.findByText('codex scope unavailable')).toBeVisible()
+    expect(screen.getByText('无法连接监控服务')).toBeVisible()
+    expect(screen.queryByText('12.84M')).not.toBeInTheDocument()
+    expect(screen.getByText('未连接')).toBeVisible()
+  })
+
+  it('does not reuse data from another host when the new server fails', async () => {
+    const api = createApi({
+      fetchDashboard: async (settings) => {
+        if (settings.host === '127.0.0.1') return dashboard
+        throw new Error('new server unavailable')
+      },
+    })
+    render(<App api={api} />)
+
+    expect(await screen.findByText('12.84M')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: '打开设置' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Host' }), {
+      target: { value: 'localhost' },
+    })
+    const apply = screen.getByRole('button', { name: '应用' })
+    await waitFor(() => expect(apply).toBeEnabled())
+    fireEvent.click(apply)
+
+    expect(await screen.findByText('new server unavailable')).toBeVisible()
+    expect(screen.getByText('无法连接监控服务')).toBeVisible()
+    expect(screen.queryByText('12.84M')).not.toBeInTheDocument()
+    expect(screen.getByText('localhost:9100')).toBeVisible()
+  })
+
   it('shows a recoverable offline state when startup cannot reach the server', async () => {
     const api = createApi({
       fetchDashboard: async () => {

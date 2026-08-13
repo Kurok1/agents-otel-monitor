@@ -45,35 +45,61 @@ interface AppProps {
   api?: MonitorApi
 }
 
+interface ScopedConnectionStatus {
+  scope: string
+  connection: ConnectionState
+  error: string
+}
+
 export default function App({ api = tauriMonitorApi }: AppProps) {
   const [settings, setSettings] = useState<ConnectionSettings>(defaultConnectionSettings)
   const [theme, setTheme] = useState<ThemeMode>('system')
   const [range, setRange] = useState<UsageRange>('day')
   const [client, setClient] = useState<TelemetryClient>('all')
-  const [data, setData] = useState<DashboardPayload | null>(null)
-  const [connection, setConnection] = useState<ConnectionState>('idle')
-  const [error, setError] = useState('')
+  const [dataByScope, setDataByScope] = useState<ReadonlyMap<string, DashboardPayload>>(
+    () => new Map(),
+  )
+  const [scopedStatus, setScopedStatus] = useState<ScopedConnectionStatus | null>(null)
   const [panelVisible, setPanelVisible] = useState(false)
   const [view, setView] = useState<View>('dashboard')
-  const dataRef = useRef<DashboardPayload | null>(null)
+  const dataCache = useRef(new Map<string, DashboardPayload>())
   const requestId = useRef(0)
+  const scope = dashboardScope(settings, range, client)
+  const data = dataByScope.get(scope) ?? null
+  const connection: ConnectionState = scopedStatus?.scope === scope
+    ? scopedStatus.connection
+    : 'idle'
+  const error = scopedStatus?.scope === scope ? scopedStatus.error : ''
 
   const refresh = useCallback(async () => {
     const currentRequest = ++requestId.current
-    if (!dataRef.current) setConnection('loading')
-    setError('')
+    const cached = dataCache.current.get(scope)
+    setScopedStatus((current) => ({
+      scope,
+      connection: cached
+        ? current?.scope === scope ? current.connection : 'connected'
+        : 'loading',
+      error: '',
+    }))
     try {
       const next = await api.fetchDashboard(settings, range, client)
       if (currentRequest !== requestId.current) return
-      dataRef.current = next
-      setData(next)
-      setConnection('connected')
+      dataCache.current.set(scope, next)
+      setDataByScope((current) => {
+        const updated = new Map(current)
+        updated.set(scope, next)
+        return updated
+      })
+      setScopedStatus({ scope, connection: 'connected', error: '' })
     } catch (reason) {
       if (currentRequest !== requestId.current) return
-      setError(errorMessage(reason))
-      setConnection(dataRef.current ? 'stale' : 'offline')
+      setScopedStatus({
+        scope,
+        connection: cached ? 'stale' : 'offline',
+        error: errorMessage(reason),
+      })
     }
-  }, [api, client, range, settings])
+  }, [api, client, range, scope, settings])
 
   useEffect(() => {
     if (theme === 'system') {
@@ -501,6 +527,14 @@ function formatTime(value: string): string {
     minute: '2-digit',
     hour12: false,
   }).format(parsed)
+}
+
+function dashboardScope(
+  settings: ConnectionSettings,
+  range: UsageRange,
+  client: TelemetryClient,
+): string {
+  return JSON.stringify([settings.host, settings.port, range, client])
 }
 
 function errorMessage(reason: unknown): string {
