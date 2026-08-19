@@ -1,6 +1,6 @@
-# Vibecoding Monitor
+# Vibecoding Monitor（agents-otel-monitor Desktop）
 
-面向 macOS 的菜单栏状态看板。项目与 `frontend/` 完全隔离，界面使用 React + TypeScript，原生壳使用 Tauri 2。
+`agents-otel-monitor` 面向 macOS 的菜单栏状态看板，可在全部 harness、Claude Code 与 Codex CLI 视图之间切换。项目与 `frontend/` 完全隔离，界面使用 React + TypeScript，原生壳使用 Tauri 2。
 
 ## 本地开发
 

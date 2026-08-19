@@ -1,20 +1,21 @@
-# Claude Code OTLP 指标与事件参考
+# Harness OTLP 指标与事件参考
 
-本文档描述 Claude Code 通过 OpenTelemetry 协议导出的指标 (Metrics) 与事件 (Events) 的数据结构，作为本项目接收端解析与建模的依据。
+本文档描述 `agents-otel-monitor` 当前支持的本地 AI coding harness 如何通过 OpenTelemetry 导出 Metrics 与 Events，以及接收端如何识别这些 vendor-specific 信号。传输层共用 OTLP gRPC，字段、时间戳、身份和 token 口径按 harness 分别建模。
 
-涵盖范围：
-- **Metrics**：8 个核心指标全部纳入
-- **Events**：第一梯队 5 个 + 第二梯队 6 个，共 11 个事件
+| Harness | 纳入的 Metrics | 纳入的 Events | 协议章节 |
+|---|---:|---:|---|
+| Claude Code | 8 | 11 | §2 |
+| OpenAI Codex CLI | 2 | 6 | §3 |
 
-> 不涵盖：`api_request_body` / `api_response_body` 原始 body 事件、`internal_error`、`auth`、`plugin_installed` / `plugin_loaded`、`hook_*` 系列。
+本文档只描述已持久化的信号。Claude Code 的 `api_request_body` / `api_response_body`、`internal_error`、`auth`、`plugin_installed` / `plugin_loaded`、`hook_*`，以及 Codex 的高容量或 Dashboard 暂不需要的事件，均不在当前持久化范围内。
 
 ---
 
 ## 1. OTLP 传输概览
 
-本项目接收端选用 **gRPC** 传输：
+所有受支持 harness 共用 **gRPC** 接收端：
 
-- 客户端配置：`OTEL_EXPORTER_OTLP_PROTOCOL=grpc`，`OTEL_EXPORTER_OTLP_ENDPOINT=http://<host>:4317`
+- Endpoint：`http://<host>:4317`；具体客户端配置分别见 §2.1 与 §3.1
 - 默认端口：`4317`
 - 服务定义（来自 `go.opentelemetry.io/proto/otlp`）：
   - Metrics：`opentelemetry.proto.collector.metrics.v1.MetricsService/Export`
@@ -23,19 +24,31 @@
   - Logs / Events：`opentelemetry.proto.collector.logs.v1.LogsService/Export`
     - Request：`ExportLogsServiceRequest`
     - Response：`ExportLogsServiceResponse`
-- Temporality 默认 `delta`（可改 `cumulative`，本项目按 `delta` 入库）
+- 接收端按各 harness 的协议约束校验 signal type 与 temporality，不在传输层强行归一化
 
 > gRPC 与 HTTP/protobuf 共享同一份 protobuf 消息定义，**只是传输层不同**。gRPC 走 HTTP/2 + 长度前缀帧 + trailer 携带状态码；HTTP/protobuf 走标准 HTTP path（`/v1/metrics`、`/v1/logs`）。本项目用 `google.golang.org/grpc` 实现 `MetricsServiceServer` / `LogsServiceServer`。
 
 ### 1.1 Metrics 数据点形态
 
-所有 8 个指标都是 **Sum (monotonic, delta)** 类型，对应 OTLP `NumberDataPoint`：
+Claude Code 的 8 个指标与 Codex 的 Skill 指标都是 **Sum (monotonic, delta)**，对应 OTLP `NumberDataPoint`：
 
 ```
 NumberDataPoint {
   start_time_unix_nano: <interval 起点>
   time_unix_nano:       <interval 终点>
   value:                <int 或 double，看指标单位>
+  attributes:           <map<string, AnyValue>>
+}
+```
+
+Codex 的 TBT 指标是 **DELTA Histogram**，接收端只保存 `count` 与 `sum`，不展开 buckets：
+
+```
+HistogramDataPoint {
+  start_time_unix_nano: <interval 起点>
+  time_unix_nano:       <interval 终点>
+  count:                <样本数>
+  sum:                  <总毫秒数>
   attributes:           <map<string, AnyValue>>
 }
 ```
@@ -58,16 +71,30 @@ LogRecord {
 
 ---
 
-## 2. 公共字段
+## 2. Claude Code 遥测
 
-### 2.1 Resource 级（每个 OTLP 请求共享）
+### 2.1 客户端配置
+
+Claude Code 使用标准 OTEL 环境变量：
+
+```bash
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
+```
+
+### 2.2 公共字段
+
+#### 2.2.1 Resource 级（每个 OTLP 请求共享）
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `service.name` | string | 固定为 `claude-code` |
 | `service.version` | string | Claude Code 版本号 |
 
-### 2.2 公共 Attributes（所有 metric 和 event 都可能携带）
+#### 2.2.2 公共 Attributes（所有 metric 和 event 都可能携带）
 
 | 字段 | 类型 | 始终存在 | 说明 |
 |---|---|---|---|
@@ -80,7 +107,7 @@ LogRecord {
 | `app.version` | string | 默认关 | Claude Code 版本 |
 | `terminal.type` | string | 检测到时 | `iTerm.app` / `vscode` / `cursor` / `tmux` 等 |
 
-### 2.3 Event 额外公共字段
+#### 2.2.3 Event 额外公共字段
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -92,7 +119,7 @@ LogRecord {
 
 ---
 
-## 3. Metrics
+### 2.3 Metrics（8 个）
 
 8 个指标统一遵循下面的"归一化结构"，存储时只需 `ts / value` + 公共属性 + 各自的特有属性。
 
@@ -101,14 +128,14 @@ LogRecord {
   "ts":         "<time_unix_nano>",        // interval 终点
   "start_ts":   "<start_time_unix_nano>",  // interval 起点
   "value":      <number>,                  // delta 数值
-  "common":     { ... },                   // §2.2 中字段
+  "common":     { ... },                   // §2.2.2 中字段
   "specific":   { ... }                    // 各指标特有 attribute
 }
 ```
 
 下面只列出每个指标的 **特有属性**。
 
-### 3.1 `claude_code.session.count`
+#### 2.3.1 `claude_code.session.count`
 
 - 单位：`count`
 - 触发：每次会话启动时 +1
@@ -117,7 +144,7 @@ LogRecord {
 |---|---|---|
 | `start_type` | string | `fresh` / `resume` / `continue` |
 
-### 3.2 `claude_code.lines_of_code.count`
+#### 2.3.2 `claude_code.lines_of_code.count`
 
 - 单位：`count`
 - 触发：代码增删时累加
@@ -126,19 +153,19 @@ LogRecord {
 |---|---|---|
 | `type` | string | `added` / `removed` |
 
-### 3.3 `claude_code.pull_request.count`
+#### 2.3.3 `claude_code.pull_request.count`
 
 - 单位：`count`
 - 触发：通过 shell 命令或 MCP 工具创建 PR / MR 时 +1
 - 无特有属性
 
-### 3.4 `claude_code.commit.count`
+#### 2.3.4 `claude_code.commit.count`
 
 - 单位：`count`
 - 触发：经由 Claude Code 创建 git commit 时 +1
 - 无特有属性
 
-### 3.5 `claude_code.cost.usage`
+#### 2.3.5 `claude_code.cost.usage`
 
 - 单位：`USD`
 - 触发：每次 API 请求后累加
@@ -154,7 +181,7 @@ LogRecord {
 | `plugin.name` | string | 拥有该 skill / agent 的插件名；第三方为 `third-party` |
 | `marketplace.name` | string | 仅 official marketplace 时出现 |
 
-### 3.6 `claude_code.token.usage`
+#### 2.3.6 `claude_code.token.usage`
 
 - 单位：`tokens`
 - 触发：每次 API 请求后累加
@@ -162,16 +189,16 @@ LogRecord {
 | 字段 | 类型 | 取值 |
 |---|---|---|
 | `type` | string | `input` / `output` / `cacheRead` / `cacheCreation` |
-| `model` | string | 同 §3.5 |
-| `query_source` | string | 同 §3.5 |
-| `speed` | string | 同 §3.5 |
-| `effort` | string | 同 §3.5 |
-| `agent.name` | string | 同 §3.5 |
-| `skill.name` | string | 同 §3.5 |
-| `plugin.name` | string | 同 §3.5 |
-| `marketplace.name` | string | 同 §3.5 |
+| `model` | string | 同 §2.3.5 |
+| `query_source` | string | 同 §2.3.5 |
+| `speed` | string | 同 §2.3.5 |
+| `effort` | string | 同 §2.3.5 |
+| `agent.name` | string | 同 §2.3.5 |
+| `skill.name` | string | 同 §2.3.5 |
+| `plugin.name` | string | 同 §2.3.5 |
+| `marketplace.name` | string | 同 §2.3.5 |
 
-### 3.7 `claude_code.code_edit_tool.decision`
+#### 2.3.7 `claude_code.code_edit_tool.decision`
 
 - 单位：`count`
 - 触发：用户接受/拒绝 Edit / Write / NotebookEdit 工具调用
@@ -183,7 +210,7 @@ LogRecord {
 | `source` | string | `config` / `hook` / `user_permanent` / `user_temporary` / `user_abort` / `user_reject` |
 | `language` | string | 文件语言，如 `TypeScript` / `Python` / `Markdown`，未识别为 `unknown` |
 
-### 3.8 `claude_code.active_time.total`
+#### 2.3.8 `claude_code.active_time.total`
 
 - 单位：`s`
 - 触发：用户交互或 CLI 处理时累加
@@ -194,20 +221,20 @@ LogRecord {
 
 ---
 
-## 4. Events — 第一梯队
+### 2.4 Events — 核心（5 个）
 
 事件归一化结构：
 
 ```jsonc
 {
   "ts":             "<time_unix_nano>",
-  "common":         { ... },         // §2.2
-  "event_common":   { ... },         // §2.3
+  "common":         { ... },         // §2.2.2
+  "event_common":   { ... },         // §2.2.3
   "specific":       { ... }          // 事件特有 attribute
 }
 ```
 
-### 4.1 `claude_code.user_prompt`
+#### 2.4.1 `claude_code.user_prompt`
 
 用户提交 prompt 时记录。
 
@@ -218,7 +245,7 @@ LogRecord {
 | `command_name` | string | 命令名；内置/官方命令原样，自定义/插件命令为 `custom`，MCP 命令为 `mcp`（除非 `OTEL_LOG_TOOL_DETAILS=1`） |
 | `command_source` | string | `builtin` / `custom` / `mcp` |
 
-### 4.2 `claude_code.api_request`
+#### 2.4.2 `claude_code.api_request`
 
 每次 API 请求成功时记录。
 
@@ -234,9 +261,9 @@ LogRecord {
 | `request_id` | string | Anthropic API request ID，如 `req_011...` |
 | `speed` | string | `fast` / `normal` |
 | `query_source` | string | 子系统名，如 `repl_main_thread` / `compact` / 子 agent 名 |
-| `effort` | string | 同 §3.5 |
+| `effort` | string | 同 §2.3.5 |
 
-### 4.3 `claude_code.api_error`
+#### 2.4.3 `claude_code.api_error`
 
 API 请求最终失败时记录（已耗尽内部重试）。
 
@@ -252,42 +279,42 @@ API 请求最终失败时记录（已耗尽内部重试）。
 | `query_source` | string | |
 | `effort` | string | |
 
-### 4.4 `claude_code.tool_result`
+#### 2.4.4 `claude_code.tool_result`
 
 工具调用执行完成时记录。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `tool_name` | string | 工具名 |
-| `tool_use_id` | string | 工具调用 ID，与 hook 一致，可与 §4.5 关联 |
+| `tool_use_id` | string | 工具调用 ID，与 hook 一致，可与 §2.4.5 关联 |
 | `success` | bool (string) | `"true"` / `"false"` |
 | `duration_ms` | int | |
 | `error_type` | string | 错误分类，如 `Error:ENOENT` / `ShellError` |
 | `error` | string | 完整错误信息（需 `OTEL_LOG_TOOL_DETAILS=1`） |
 | `decision_type` | string | `accept` / `reject` |
-| `decision_source` | string | 同 §3.7 `source` |
+| `decision_source` | string | 同 §2.3.7 `source` |
 | `tool_input_size_bytes` | int | 输入 JSON 大小 |
 | `tool_result_size_bytes` | int | 结果大小 |
 | `mcp_server_scope` | string | MCP 工具时存在 |
 | `tool_parameters` | string (JSON) | 需 `OTEL_LOG_TOOL_DETAILS=1`；Bash 工具含 `bash_command` / `full_command` / `git_commit_id` 等 |
 | `tool_input` | string (JSON) | 需 `OTEL_LOG_TOOL_DETAILS=1`；单值超 512 字符截断，整体 ~4KB |
 
-### 4.5 `claude_code.tool_decision`
+#### 2.4.5 `claude_code.tool_decision`
 
 工具权限决策时记录。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `tool_name` | string | |
-| `tool_use_id` | string | 与 §4.4 对齐 |
+| `tool_use_id` | string | 与 §2.4.4 对齐 |
 | `decision` | string | `accept` / `reject` |
 | `source` | string | `config` / `hook` / `user_permanent` / `user_temporary` / `user_abort` / `user_reject` |
 
 ---
 
-## 5. Events — 第二梯队
+### 2.5 Events — 扩展（6 个）
 
-### 5.1 `claude_code.api_retries_exhausted`
+#### 2.5.1 `claude_code.api_retries_exhausted`
 
 API 请求多次重试仍失败时记录，与最终 `api_error` 同时出现。
 
@@ -300,7 +327,7 @@ API 请求多次重试仍失败时记录，与最终 `api_error` 同时出现。
 | `total_retry_duration_ms` | int | 所有尝试总耗时 |
 | `speed` | string | `fast` / `normal` |
 
-### 5.2 `claude_code.compaction`
+#### 2.5.2 `claude_code.compaction`
 
 会话压缩完成时记录。
 
@@ -311,7 +338,7 @@ API 请求多次重试仍失败时记录，与最终 `api_error` 同时出现。
 | `duration_ms` | int | |
 | `pre_tokens` | int | 压缩前 token 数 |
 
-### 5.3 `claude_code.permission_mode_changed`
+#### 2.5.3 `claude_code.permission_mode_changed`
 
 权限模式切换时记录。
 
@@ -321,7 +348,7 @@ API 请求多次重试仍失败时记录，与最终 `api_error` 同时出现。
 | `to_mode` | string | 同上 |
 | `trigger` | string | `shift_tab` / `exit_plan_mode` / `auto_gate_denied` / `auto_opt_in`；SDK / bridge 触发时缺省 |
 
-### 5.4 `claude_code.mcp_server_connection`
+#### 2.5.4 `claude_code.mcp_server_connection`
 
 MCP server 连接 / 断开 / 失败时记录。
 
@@ -335,7 +362,7 @@ MCP server 连接 / 断开 / 失败时记录。
 | `server_name` | string | 需 `OTEL_LOG_TOOL_DETAILS=1` |
 | `error` | string | 需 `OTEL_LOG_TOOL_DETAILS=1` |
 
-### 5.5 `claude_code.skill_activated`
+#### 2.5.5 `claude_code.skill_activated`
 
 Skill 被调用时记录（通过 Skill 工具或 `/` 命令）。
 
@@ -347,7 +374,7 @@ Skill 被调用时记录（通过 Skill 工具或 `/` 命令）。
 | `plugin.name` | string | skill 来自插件时存在 |
 | `marketplace.name` | string | 同上 |
 
-### 5.6 `claude_code.at_mention`
+#### 2.5.6 `claude_code.at_mention`
 
 prompt 中的 `@`-mention 被解析时记录。
 
@@ -358,17 +385,17 @@ prompt 中的 `@`-mention 被解析时记录。
 
 ---
 
-## 6. 兜底策略
+### 2.6 未识别字段兜底
 
 为应对 Claude Code 版本升级新增 attribute 的情况，每张表保留一个 `attrs JSON` 列，存储未被显式提取到列的所有 attribute。详见 [`models.md`](./models.md)。
 
 ---
 
-## 7. Codex CLI 遥测
+## 3. OpenAI Codex CLI 遥测
 
-自 v2.2 起同步接收 OpenAI Codex CLI 的 OTEL Logs；当前同时接收 Dashboard 所需的 Skill 与 TBT Metrics（调研与决策见 `docs/superpowers/specs/2026-07-01-codex-otel-support-design.md`，本节 Metrics 实测基线 codex-cli 0.145.0）。
+Codex CLI 的持久化映射自 v2.2 引入，当前包含 6 个核心 Logs 事件以及 Dashboard 所需的 Skill 与 TBT Metrics（调研与决策见 `docs/superpowers/specs/2026-07-01-codex-otel-support-design.md`，本节 Metrics 实测基线 codex-cli 0.145.0）。
 
-### 7.1 客户端配置
+### 3.1 客户端配置
 
 Codex **不读取标准 OTEL 环境变量**，只认 `~/.codex/config.toml` 的 `[otel]` 段；Logs 与 Metrics 都需要指向本服务：
 
@@ -379,7 +406,7 @@ exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
 metrics_exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
 ```
 
-### 7.2 Resource 与公共属性
+### 3.2 Resource 与公共属性
 
 - Resource：`service.name` = originator（如 `codex_cli_rs` / `codex_exec` / `codex_vscode`）、`service.version`、`env`、`host.name`，均不提取（落 `attrs`）
 - 每条事件的公共 attribute：`conversation.id`、`app.version`、`auth_mode`（`ApiKey` / `Chatgpt`）、`originator`、`terminal.type`、`model`、`slug`、`user.account_id`（可空）、`user.email`（可空）
@@ -387,7 +414,7 @@ metrics_exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
 - 事件名在 `event.name` attribute，**完整带 `codex.` 前缀**（实测确认）
 - **时间戳**：Codex 不设置 LogRecord 的 `time_unix_nano`（恒为 0，实测确认）。接收端按 `time_unix_nano` → `observed_time_unix_nano` → `event.timestamp` attribute（RFC3339）三级回退解析
 
-### 7.3 入库事件（6 个）
+### 3.3 入库事件（6 个）
 
 | 事件 | 入库表 | 关键专有属性 |
 |---|---|---|
@@ -400,7 +427,7 @@ metrics_exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
 
 范围外（识别但不落库，计入 Unknown）：`codex.startup_phase`、`codex.websocket_connect` / `websocket_request`、`codex.auth_recovery`、`codex.turn_ttft`、`codex.sandbox_outcome`、`codex.network_proxy.policy_decision`、`codex.plugin_install_*`。
 
-### 7.4 入库 Metrics
+### 3.4 入库 Metrics（2 个）
 
 | Metric | OTLP 形态 | 入库表 | 用途 |
 |---|---|---|---|
@@ -409,7 +436,7 @@ metrics_exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
 
 TBT 是相邻生成 token 的平均时间（time between tokens），适合作为 Codex 的纯解码速度。`codex.websocket_request.duration_ms` 实测只有 WebSocket 发送开销，并非模型生成耗时，不能用于该指标。Metrics 当前不带稳定的 request / turn ID，因此接收端不做时间戳模糊关联。
 
-### 7.5 token 口径（与 Claude Code 的关键差异）
+### 3.5 token 口径（与 Claude Code 的关键差异）
 
 OpenAI 计数是**子集式**：`cached ⊂ input`、`reasoning ⊂ output`；Anthropic 是**并列式**（cacheRead / cacheCreation 独立于 input）。统一总量公式：
 

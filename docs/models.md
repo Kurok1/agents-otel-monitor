@@ -1,22 +1,27 @@
-# DuckDB 数据模型
+# Harness Telemetry DuckDB 数据模型
 
-每个指标 / 事件单独建一张窄表，共 **27 张表**：
+每个已纳入的指标 / 事件单独建一张窄表，共 **27 张表**。表族保留各 harness 的原生语义，跨 harness 归一化只发生在查询层：
 
-- Claude Code：8 张 metric 表（前缀 `metric_`）+ 11 张 event 表（前缀 `event_`）
-- Codex CLI：2 张 metric 表（前缀 `codex_metric_`）+ 6 张 event 表（前缀 `codex_event_`），见 §7
+| Harness | Metric 表 | Event 表 | 命名 |
+|---|---:|---:|---|
+| Claude Code | 8 | 11 | 历史无 harness 前缀：`metric_*` / `event_*` |
+| OpenAI Codex CLI | 2 | 6 | `codex_metric_*` / `codex_event_*`，见 §7 |
 
 设计原则：
 1. **一指标 / 一事件 = 一张表**，避免大宽表 schema 漂移
-2. 高频查询维度提到顶层列；其余 attribute 落入 `attrs VARCHAR`，保证 Claude Code 升级新增字段时无需迁移
+2. 高频查询维度提到顶层列；其余 attribute 落入 `attrs VARCHAR`，保证 harness 升级新增字段时无需立即迁移
 3. 列名使用 `snake_case`，OTLP 中带 `.` 的字段（如 `agent.name`）映射为下划线（`agent_name`）
-4. 时间戳统一使用 `TIMESTAMP`（微秒精度），从 OTLP 的 `time_unix_nano` 转换得到
+4. 时间戳统一使用 `TIMESTAMP`（微秒精度）；先按 harness 规则解析 OTLP 时间，再转换入库
 5. 字符串枚举一律 `VARCHAR`，不使用 DuckDB `ENUM` 类型（演进成本高）
+6. 不跨 harness 复用身份、时间戳或 token 口径；每个表族独立定义公共列，Dashboard / API 显式归一化
 
 ---
 
-## 1. 公共列约定
+## 1. Claude Code 表族公共列
 
-### 1.1 所有表共有
+本节只适用于历史无前缀的 Claude Code 表族；Codex 表族的公共列见 §7.1。
+
+### 1.1 所有 Claude Code 表共有
 
 | 列 | 类型 | NULL | 说明 |
 |---|---|---|---|
@@ -49,7 +54,7 @@
 
 ---
 
-## 2. Metric 表（8 张）
+## 2. Claude Code Metric 表（8 张）
 
 ### 2.1 `metric_session_count`
 
@@ -239,7 +244,7 @@ CREATE TABLE metric_active_time_total (
 
 ---
 
-## 3. Event 表 — 第一梯队（5 张）
+## 3. Claude Code Event 表 — 核心（5 张）
 
 ### 3.1 `event_user_prompt`
 
@@ -389,7 +394,7 @@ CREATE TABLE event_tool_decision (
 
 ---
 
-## 4. Event 表 — 第二梯队（6 张）
+## 4. Claude Code Event 表 — 扩展（6 张）
 
 ### 4.1 `event_api_retries_exhausted`
 
@@ -550,7 +555,7 @@ CREATE TABLE event_at_mention (
 
 ### 5.1 时间戳
 
-OTLP 协议使用 `int64` 纳秒精度 (`time_unix_nano`)。DuckDB 默认 `TIMESTAMP` 为微秒精度，转换时除以 1000 即可。如需保留纳秒精度可改用 `TIMESTAMP_NS`，但会牺牲与外部 BI 工具的兼容性。本项目采用 `TIMESTAMP` (微秒)。
+OTLP 时间字段使用 `int64` 纳秒精度。解析器先按 harness 规则确定事件时间：Claude Code 使用 `time_unix_nano`，Codex Logs 使用 `time_unix_nano` → `observed_time_unix_nano` → `event.timestamp` 三级回退。确定时间后以 UTC `time.Time` 写入 DuckDB `TIMESTAMP`（微秒精度）；如需保留纳秒精度可改用 `TIMESTAMP_NS`，但会牺牲与外部 BI 工具的兼容性。
 
 ### 5.2 批量写入
 
@@ -575,13 +580,15 @@ CREATE INDEX idx_event_api_request_request_id ON event_api_request(request_id);
 CREATE INDEX idx_event_tool_result_tool_use_id ON event_tool_result(tool_use_id);
 ```
 
-### 5.5 关联查询
+### 5.5 Harness 内关联查询
 
-跨表关联主要靠：
+Claude Code 表族主要靠：
 - `prompt_id`：串联同一 prompt 的 user_prompt / api_request / tool_result
 - `tool_use_id`：串联 tool_decision ↔ tool_result
 - `session_id` + `ts` 范围：单会话时间线
 - `request_id`：同一 API 请求的 cost / token 指标与 api_request / api_error 事件对齐（注意：metrics 没有 request_id，无法直接 join，只能按 session_id + 时间窗近似关联）
+
+Codex 表族主要靠 `conversation_id` 组织会话，`call_id` 串联 tool_decision ↔ tool_result。两个 harness 的原生 ID 不互通；查询 API 分别聚合后再按 harness family 合并，不做跨表族事件关联。
 
 ### 5.6 数据保留
 
@@ -594,36 +601,40 @@ DuckDB 单文件长期增长后查询性能下降。建议：
 
 ### 5.7 用量热点图（heatmap）
 
-`GET /api/usage/heatmap` 复用现有三张表按本地日（`date_trunc('day', ts + INTERVAL N HOUR)`）聚合，**无需新增表 / 迁移**：
+`GET /api/usage/heatmap?client=all|claude|codex` 按本地日（`date_trunc('day', ts + INTERVAL N HOUR)`）分别聚合所选 harness 表族，**无需新增表 / 迁移**：
 
-- Token：`SUM(value)` from `metric_token_usage`
-- 费用：`SUM(value)` from `metric_cost_usage`
-- 请求：`COUNT(*)` from `event_api_request`
+| 维度 | Claude Code | Codex CLI |
+|---|---|---|
+| Token | `SUM(value)` from `metric_token_usage` | `SUM(input_token_count + output_token_count)` from `codex_event_token_usage` |
+| 费用 | `SUM(value)` from `metric_cost_usage` | `SUM(cost_usd)` from `codex_event_token_usage`（可选估算） |
+| 请求 | `COUNT(*)` from `event_api_request` | `COUNT(*)` from `codex_event_token_usage`（completed 粒度） |
 
-固定取最近 360 个本地日（含今日），逐日补零。每天的综合强度 `score ∈ [0,1]` 在 Go 侧计算：各指标按 360 天窗口内最大值归一化（min 固定为 0），再用 `config.yaml` 的 `dashboard.heatmap` 权重加权后除以权重和。前端按分位数把 `score` 分成 5 档着色。
+固定取最近 360 个本地日（含今日），逐日补零。每天的综合强度 `score ∈ [0,1]` 在 Go 侧计算：各指标按 360 天窗口内最大值归一化（min 固定为 0），再用 `config.yaml` 的 `dashboard.heatmap` 权重加权后除以权重和。Codex-only 且未启用 pricing 时不把费用权重计入分母。前端按分位数把 `score` 分成 5 档着色。
 
 > 注意：`docs §5.6` 的归档策略（>90 天导出 parquet 后 `DELETE`）一旦实装，360 天热点图需要 `UNION read_parquet(...)` 才能覆盖完整窗口；当前归档未实装，故暂不受影响。
 
 ## 6. 演进策略
 
-新增 Claude Code 版本带来的字段处理流程：
+受支持 harness 的新版本带来字段时：
 
 1. **未识别 attribute** 自动落入 `attrs VARCHAR`，前端 / API 可临时查询
 2. 验证为高频维度后，执行 `ALTER TABLE ... ADD COLUMN <name> <type>;`
 3. 接收端代码补充提取逻辑，新数据写入新列
 4. 老数据保留在 `attrs` 内不回填（DuckDB 也可批量 UPDATE 回填，按需）
 
-新增整张表（新指标 / 新事件）：
+为现有 harness 新增整张表（新指标 / 新事件）：
 
 1. `internal/store/migrations/` 增加 `NNN_add_<table>.sql`
 2. 启动时按版本号顺序执行迁移
 3. 接收端 dispatcher 增加对应路由
 
+新增 harness 时先在 `docs/protocol.md` 定义独立协议映射，再建立带 harness 前缀的新表族及查询层投影；不要复用 Claude Code 历史无前缀表的公共列假设。
+
 ---
 
-## 7. Codex 表（8 张）
+## 7. OpenAI Codex CLI 表族（8 张）
 
-来自 OpenAI Codex CLI 的 OTEL Logs 与选定 Metrics（协议见 [`protocol.md`](./protocol.md) §7），DDL 在 `internal/store/migrations/003_codex_event_tables.sql`、`005_codex_skill_metrics.sql`、`006_codex_response_tbt_metric.sql`。
+来自 OpenAI Codex CLI 的 OTEL Logs 与选定 Metrics（协议见 [`protocol.md`](./protocol.md) §3），DDL 在 `internal/store/migrations/003_codex_event_tables.sql`、`005_codex_skill_metrics.sql`、`006_codex_response_tbt_metric.sql`。
 
 ### 7.1 公共列（codex 表族）
 

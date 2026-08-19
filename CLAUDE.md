@@ -1,27 +1,38 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides repository guidance for coding agents working in this repository.
 
 ---
 
 ## 项目概览
 
-`claude-code-monitor` 是一个 Go 实现的 AI 编码客户端监控服务：
+`agents-otel-monitor` 是一个 Go 实现的本地 AI coding harness OTEL 监控服务：
 
-- **输入**：Claude Code（Metrics + Events）与 OpenAI Codex CLI（Events + Dashboard 所需 Metrics）通过 **OTLP gRPC** 推送的遥测，共用 4317 端口
-- **存储**：DuckDB 单文件，**一指标 / 一事件 = 一张表**，共 **27 张表**（Claude 19 张 + Codex 2 张 `codex_metric_*` + 6 张 `codex_event_*`）
+- **领域主语**：harness；当前对等支持 Claude Code 与 OpenAI Codex CLI，术语边界见 `CONTEXT.md`
+- **输入**：各 harness 通过 **OTLP gRPC** 向同一个 4317 端口推送 Metrics / Events
+- **存储**：DuckDB 单文件，按 harness 协议维护独立表族，**一指标 / 一事件 = 一张表**，共 **27 张表**
 - **当前版本**：后端 ingest、查询 API 与 Web Dashboard 均已落地
+
+| Harness family | 信号 | 表族 |
+|---|---|---|
+| `claude` | 8 Metrics + 11 Events | 19 张历史无前缀表（`metric_*` / `event_*`） |
+| `codex` | 2 Metrics + 6 Events | 8 张 `codex_metric_*` / `codex_event_*` 表 |
+
+仓库名称已迁移；代码中的 Go module、二进制、`/version.service` 与部分兼容标识仍使用 `claude-code-monitor`。除非任务明确包含运行时迁移，不要只改其中一处造成协议、发布物与更新器命名不一致。
 
 ---
 
 ## 必读文档
 
-下面两份是架构基线，新增 / 修改逻辑前必读：
+下面三份是架构与领域基线，新增 / 修改逻辑前按变更范围读取：
 
 | 文档 | 内容 |
 |---|---|
+| `CONTEXT.md` | harness、harness family、harness telemetry 等领域词汇 |
 | `docs/protocol.md` | Claude / Codex 指标与事件的 OTLP 数据结构、字段约束、取值范围 |
 | `docs/models.md` | 27 张 DuckDB 表的完整 DDL + 公共列约定 + 写入要点 |
+
+`docs/plan-*`、`docs/plans/` 与 `docs/superpowers/{plans,specs}/` 记录当时的设计和实施背景，可能包含旧仓库名或 Claude-only 阶段的事实；保留其历史语境。与当前行为冲突时，以 `CONTEXT.md`、`docs/protocol.md`、`docs/models.md` 和代码为准。
 
 ---
 
@@ -30,8 +41,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 数据流（**理解此图等于理解整个系统**）：
 
 ```
-Claude Code / Codex (gRPC client, OTLP/protobuf)
-        │  :4317
+Claude Code                OpenAI Codex CLI
+     │                           │
+     └──────── OTLP/gRPC :4317 ──┘
         ▼
 [MetricsServiceServer]  [LogsServiceServer]    ← internal/otlp/*_service.go
         │                       │
@@ -39,13 +51,12 @@ Claude Code / Codex (gRPC client, OTLP/protobuf)
         ▼                       ▼
               [Dispatcher]                     ← internal/otlp/dispatch.go
                     │
-       按 metric.name / event.name 路由
-       （event.name 带 codex. 前缀 → dispatchCodexEvent）
+       按 harness 协议及 metric.name / event.name 路由
                     │
         ┌───────────┴───────────┐
         ▼                       ▼
-  parseXxx()                parseYyy()         ← internal/otlp/{metrics,events,codex_events}.go
-   → XxxRow                 → YyyRow            （27 个强类型 row struct）
+ Claude parsers            Codex parsers       ← internal/otlp/{metrics,events,codex_events}.go
+ → legacy table rows       → codex_* rows       （27 个强类型 row struct）
         │                       │
         └───────────┬───────────┘
                     ▼
@@ -69,7 +80,7 @@ Claude Code / Codex (gRPC client, OTLP/protobuf)
 - 解析器输出的 row struct 字段顺序**必须**与 DDL 列顺序对齐，因为 Appender 是位置式 API
 - 公共属性（user.id / session.id / model 等）在 Resource 层和数据点层都可能出现，**数据点层覆盖 Resource 层**
 - 未识别的 metric / event → `unknown` 日志，不报错；未识别的 attribute → 落入 `attrs JSON` 列
-- Claude 表族 `user.id` 是硬性 NOT NULL 前提；**codex 表族无身份硬约束**（user_account_id / user_email 可空）
+- Claude 表族 `user.id` 是硬性 NOT NULL 前提；**Codex 表族无身份硬约束**（user_account_id / user_email 可空）
 - **Codex 隐私红线**：`codex.tool_result` 的 `arguments` / `output` 原文在解析层只算长度即丢弃，不落列也不落 attrs
 - Codex 时间戳三级回退：`time_unix_nano`（恒为 0）→ `observed_time_unix_nano` → `event.timestamp` attribute
 
@@ -101,17 +112,7 @@ duckdb ./data/monitor.duckdb "SELECT table_name FROM duckdb_tables() ORDER BY 1;
 duckdb ./data/monitor.duckdb "SELECT COUNT(*) FROM metric_token_usage;"
 ```
 
-让 Claude Code 把数据打到本地服务的环境变量：
-
-```bash
-export CLAUDE_CODE_ENABLE_TELEMETRY=1
-export OTEL_METRICS_EXPORTER=otlp
-export OTEL_LOGS_EXPORTER=otlp
-export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-export OTEL_METRIC_EXPORT_INTERVAL=10000      # 调试时缩短
-export OTEL_LOGS_EXPORT_INTERVAL=5000
-```
+端到端采集配置见 `README.md` 的“配置 harness 遥测”：Claude Code 可直接 `source scripts/claude-env.sh`，Codex CLI 需配置 `~/.codex/config.toml` 的 `[otel]` 段。
 
 ---
 
@@ -245,12 +246,12 @@ for _, row := range rows {
 | 仅支持 gRPC，不支持 HTTP/protobuf | gRPC 已覆盖默认场景，stub 直接给 Export 签名，实现更简洁 |
 | YAML 单一配置源，不引入 koanf / viper | 单一来源够用，`yaml.v3` 直接 Unmarshal 即可 |
 | 一指标/事件一表（27 张窄表） | 避免大宽表 schema 漂移，详见 `docs/models.md` §1 |
-| 未识别字段进 `attrs JSON` 兜底 | Claude Code 升级新增 attribute 时无需迁移 |
+| 未识别字段进 `attrs JSON` 兜底 | 任一受支持 harness 升级新增 attribute 时无需立即迁移 |
 | Query API 推迟到 v2 | 没有前端需求时定义 API 容易过度设计 |
 | `TIMESTAMP` 微秒精度而非 `TIMESTAMP_NS` | 兼容外部 BI 工具；详见 `docs/models.md` §5.1 |
 | 全局 mutex 串行 flush | DuckDB 单写者约束；监控吞吐远低于其极限，简单优先 |
-| 背压策略：丢最旧 + 日志，不反压客户端 | OTLP SDK 自身就会丢，监控不能阻塞客户端 |
-| Codex 用平行 `codex_event_*` 表，不归一进 Claude 表 | 两家协议独立演进互不干扰；统一用量视图放查询层（见 spec 2026-07-01） |
+| 背压策略：丢最旧 + 日志，不反压 harness | OTLP SDK 自身就会丢，监控不能阻塞本地 harness |
+| 各 harness 保留协议原生表族，查询层再统一 | 不把一个 harness 的身份、token 或事件语义强套到另一个；Claude 使用历史无前缀表，Codex 使用 `codex_*` 表（见 spec 2026-07-01） |
 | Codex `tool_result` 原文只存长度 | Codex 默认不脱敏且无客户端开关，敏感内容不落盘 |
 | Codex 接 6 个核心 Logs 事件及 Dashboard 所需的 Skill / service TBT Metrics | Skill 用 monotonic DELTA Sum；TBT 用 DELTA Histogram 且只保存 count/sum，不展开 bucket；其余高容量 metrics 与 sandbox / network_proxy 等事件无 Dashboard 需求 |
 | Codex/第三方成本由 `internal/pricing` 在 ingest 时按 LiteLLM 计价表**估算** `cost_usd`（v2.4.0，反转早期「不估算」非目标）；Claude 仍用自报权威成本 | Codex 不上报 cost；用外部计价表估算填补，默认关闭零影响，单价写入时冻结不回填（见 spec/plan 2026-07-02-third-party-cost-estimation） |

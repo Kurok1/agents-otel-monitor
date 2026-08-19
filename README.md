@@ -1,28 +1,43 @@
-# claude-code-monitor
+# agents-otel-monitor
 
-Go 实现的 Claude Code / OpenAI Codex 监控服务。通过 **OTLP gRPC** 接收两种客户端的 Metrics 与 Events，落到本地 DuckDB（一指标 / 一事件 = 一张表，共 **27 张表**），便于后续做聚合分析与可视化。
+面向本地 AI coding harness 的 OTEL 监控服务。项目通过 **OTLP gRPC** 接收 harness 的 Metrics 与 Events，按各自协议落到本地 DuckDB，再提供统一的查询 API、Web Dashboard 与 macOS 菜单栏看板。
+
+当前支持：
+
+| Harness | 接收信号 | DuckDB 表族 |
+|---|---|---|
+| Claude Code | 8 Metrics + 11 Events | 19 张历史无前缀表（`metric_*` / `event_*`） |
+| OpenAI Codex CLI | 2 Metrics + 6 Events | 8 张 `codex_metric_*` / `codex_event_*` 表 |
+
+项目地址：[`github.com/Kurok1/agents-otel-monitor`](https://github.com/Kurok1/agents-otel-monitor)
+
+> **命名兼容说明**：仓库与项目名称已改为 `agents-otel-monitor`。当前发布二进制、Docker image、`/version` 的 `service` 值、更新检查环境变量和部分运行路径仍保留旧标识 `claude-code-monitor`；下文涉及这些实际接口时继续使用旧名，直至单独完成运行时标识迁移。
 
 ---
 
 ## 架构
 
 ```
-Claude Code / Codex (gRPC)
+Supported local harnesses
+  ├─ Claude Code
+  └─ OpenAI Codex CLI
         │  :4317
         ▼
 [OTLP MetricsService / LogsService]
         │
         ▼
-[Dispatcher]  → 按 metric.name / event.name 路由到 27 个强类型 row 结构体
+[Dispatcher]  → 按 harness 协议及 metric.name / event.name 路由
         │
         ▼
-[BufferedWriter]  → 每张表独立 buffer + DuckDB Appender
+[27 typed rows] → [BufferedWriter] → 每张表独立 buffer + DuckDB Appender
         │            按 batch_size 或 flush_interval 触发
         ▼
    DuckDB 单文件
 ```
 
-更深的设计依据见：
+当前架构与术语依据见：
+
+- [`CONTEXT.md`](CONTEXT.md) — harness 领域词汇与边界
 - [`docs/protocol.md`](docs/protocol.md) — OTLP 指标 / 事件字段规范
 - [`docs/models.md`](docs/models.md) — DuckDB 表结构 + 写入要点
 - [`CLAUDE.md`](CLAUDE.md) — 项目开发规范与不变量
@@ -40,7 +55,7 @@ go build -o bin/server ./cmd/server
 
 依赖 CGO（go-duckdb），首次构建会拉取 DuckDB 静态库。
 
-> Release 预编译二进制覆盖 linux-amd64 / linux-arm64 / darwin-arm64；**Intel Mac（darwin-amd64）请自行 `go build` 编译**（GitHub Actions 的 macos-13 runner 队列不稳定，已从 release matrix 移除）；**Windows 请使用 Docker 镜像 `ghcr.io/kurok1/claude-code-monitor`**（runner 的 mingw gcc ≥ 13 与 duckdb 预编译静态库存在 emutls 符号不兼容，windows-amd64 已于 v2.2.0 移出 release matrix）。
+> Release 预编译二进制覆盖 linux-amd64 / linux-arm64 / darwin-arm64；**Intel Mac（darwin-amd64）请自行 `go build` 编译**（GitHub Actions 的 macos-13 runner 队列不稳定，已从 release matrix 移除）；**Windows 请使用当前兼容镜像 `ghcr.io/kurok1/claude-code-monitor`**（runner 的 mingw gcc ≥ 13 与 duckdb 预编译静态库存在 emutls 符号不兼容，windows-amd64 已于 v2.2.0 移出 release matrix）。
 
 含前端（一键打前端 + Go 嵌入产出单二进制）：
 ```bash
@@ -76,7 +91,7 @@ grpc server listening  addr=127.0.0.1:4317
 
 | 端口 | 协议 | 用途 |
 |---|---|---|
-| `4317` | gRPC (HTTP/2) | Claude Code / Codex OTLP 接收，**不要用浏览器访问** |
+| `4317` | gRPC (HTTP/2) | 已支持 harness 的 OTLP 接收，**不要用浏览器访问** |
 | `9100` | HTTP/1.1 | Web UI（`/`）+ 查询 API（`/api/usage/*`）+ 版本（`/version`）+ stats（`/internal/*`）+ pprof（`/debug/pprof/*`） |
 
 浏览器访问 **`http://localhost:9100/`** 即可看到前端看板。**前提**：先在 `frontend/` 跑过 `npm run build`，二进制重新 `go build` 一次（前端产物通过 `//go:embed` 嵌入）。前端没构建时 server 启动日志里会有 `web UI not mounted`，`/` 会回落到原先的纯文本说明页。
@@ -116,7 +131,11 @@ curl -s http://127.0.0.1:9100/version
 
 > 平台说明：restart 实现依赖 `lsof`（macOS / Linux 自带）。Windows 暂未实现自动 restart，重复启动会因 PID 解析失败返回错误；请手动 `taskkill` 或加 `-skip-if-running`。
 
-### 3. 把 Claude Code 指向本服务
+### 3. 配置 harness 遥测
+
+可以只配置一个 harness，也可以让 Claude Code 与 Codex CLI 同时向同一个 `4317` 端口上报。
+
+#### 3.1 Claude Code
 
 在另一个终端：
 ```bash
@@ -135,7 +154,7 @@ export OTEL_METRIC_EXPORT_INTERVAL=10000   # 调试可短，生产改回 60000
 export OTEL_LOGS_EXPORT_INTERVAL=5000
 ```
 
-### 3.1（可选）把 OpenAI Codex CLI 指向本服务
+#### 3.2 OpenAI Codex CLI
 
 Codex **不读取标准 OTEL 环境变量**，只认 `~/.codex/config.toml` 的 `[otel]` 段；其 Logs 导出默认关闭，需要显式配置：
 
@@ -147,35 +166,39 @@ metrics_exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
 # log_user_prompt = true    # 可选：上报 prompt 原文（默认 "[REDACTED]"）
 ```
 
-Logs 落入 6 张 `codex_event_*` 表（会话 / API 请求 / token 用量 / prompt / 工具决策与结果）；Metrics 中的 Skill 注入和原生 TBT 分别落入 `codex_metric_skill_injected`、`codex_metric_response_tbt`。**必须同时配置 `exporter` 与 `metrics_exporter`**；后者只影响启用后的新会话，历史 Skill / TBT 无法回填。详见 `docs/protocol.md` §7 与 `docs/models.md` §7。
+Logs 落入 6 张 `codex_event_*` 表（会话 / API 请求 / token 用量 / prompt / 工具决策与结果）；Metrics 中的 Skill 注入和原生 TBT 分别落入 `codex_metric_skill_injected`、`codex_metric_response_tbt`。**必须同时配置 `exporter` 与 `metrics_exporter`**；后者只影响启用后的新会话，历史 Skill / TBT 无法回填。详见 `docs/protocol.md` §3 与 `docs/models.md` §7。
 
 注意：Codex 不上报成本（cost_usd），token 计数是子集式口径（cached ⊂ input、reasoning ⊂ output）。自 v2.4.0 起可选启用 `pricing`（默认关闭）按 LiteLLM 计价表在 ingest 时**估算** Codex 成本，落入 `codex_event_token_usage.cost_usd`——配置见 `config.example.yaml` 的 `pricing` 段。
 
 ### 4. 查询
 
 ```bash
+# 统一看板查询（默认 client=all，也可用 claude / codex）
+curl 'http://127.0.0.1:9100/api/usage/snapshot?range=day&client=all'
+
+# 原始表查询
 duckdb data/monitor.duckdb "SELECT table_name FROM duckdb_tables() ORDER BY 1;"
 
-# Token 用量（按模型 + 类型）
+# Claude Code Token 用量（按模型 + 类型）
 duckdb data/monitor.duckdb "
   SELECT model, type, SUM(value) AS tokens
   FROM metric_token_usage
   WHERE ts >= now() - INTERVAL 1 DAY
   GROUP BY 1, 2 ORDER BY 1, 2;"
 
-# 当日成本（USD）
+# Claude Code 当日成本（USD）
 duckdb data/monitor.duckdb "
   SELECT model, ROUND(SUM(value), 4) AS usd
   FROM metric_cost_usage
   WHERE ts >= now() - INTERVAL 1 DAY
   GROUP BY 1 ORDER BY 2 DESC;"
 
-# 工具调用接受 / 拒绝比
+# Claude Code 工具调用接受 / 拒绝比
 duckdb data/monitor.duckdb "
   SELECT tool_name, decision_type, COUNT(*) FROM event_tool_result
   GROUP BY 1, 2 ORDER BY 1, 2;"
 
-# 用 prompt.id 串起一个 prompt 全周期
+# Claude Code：用 prompt.id 串起一个 prompt 全周期
 duckdb data/monitor.duckdb "
   SELECT 'prompt' AS evt, ts FROM event_user_prompt WHERE prompt_id = '<UUID>'
   UNION ALL
@@ -196,9 +219,9 @@ duckdb data/monitor.duckdb "
 
 ---
 
-## 用 Claude Code Hook 自动启动（可选）
+## 可选：用 Claude Code Hook 自动启动
 
-不想每次手动开 server，可以挂到 Claude Code 的 SessionStart / SessionResume 钩子。仓库里提供了一个幂等脚本 `scripts/hook-session-start.sh`：缺二进制会自动 `go build`，缺 `config.yaml` 会从 `config.example.yaml` 复制，最后用 `nohup` 后台拉起 server。**脚本会传 `-skip-if-running`，使 server preflight 在 gRPC 端口已被占用时 ~14ms 内 exit 0**，所以重复触发完全安全（不会反复 cycle 现有实例）。
+这是 Claude Code 专属的启动便利项，不影响服务同时接收其它 harness。仓库提供了幂等脚本 `scripts/hook-session-start.sh`：缺二进制会自动 `go build`，缺 `config.yaml` 会从 `config.example.yaml` 复制，最后用 `nohup` 后台拉起 server。**脚本会传 `-skip-if-running`，使 server preflight 在 gRPC 端口已被占用时 ~14ms 内 exit 0**，所以重复触发完全安全（不会反复 cycle 现有实例）。
 
 在 `~/.claude/settings.json` 里加入：
 
@@ -211,7 +234,7 @@ duckdb data/monitor.duckdb "
         "hooks": [
           {
             "type": "command",
-            "command": "/绝对路径/to/claude-code-monitor/scripts/hook-session-start.sh"
+            "command": "/绝对路径/to/agents-otel-monitor/scripts/hook-session-start.sh"
           }
         ]
       }
@@ -284,9 +307,9 @@ GET /internal/stats                         per-table buffer 计数
 GET /debug/pprof/*                          运行时 profile（enable_pprof: true 时）
 ```
 
-usage / rankings / sessions 端点均支持 `client=all|claude|codex`（缺省 `all`）按客户端过滤。工具排名在 `all` 下直接合并两家的原始工具名；Skill 排名将 Claude 的 `skill_activated` 与 Codex 成功的 `skill.injected` delta 相加。Codex 的 token 统计口径为子集式，合并总量 = input + output（不重复计 cached/reasoning）。生成速度：Claude 使用 output tokens / 请求耗时，Codex 使用 `1000 / 平均 service TBT(ms)`；两种口径不会合并成一个 all-client KPI。成本：Claude 为客户端自报的权威值；Codex 为可选估算值（启用 `pricing` 后），响应用 `cost_estimated` 标记，前端在 codex/all 视图标注「含估算」。
+usage / rankings / sessions 端点均支持 `client=all|claude|codex`（缺省 `all`）按 harness family 过滤；`client` 是现有 API 的兼容参数名。工具排名在 `all` 下直接合并两家的原始工具名；Skill 排名将 Claude 的 `skill_activated` 与 Codex 成功的 `skill.injected` delta 相加。Codex 的 token 统计口径为子集式，合并总量 = input + output（不重复计 cached/reasoning）。生成速度：Claude 使用 output tokens / 请求耗时，Codex 使用 `1000 / 平均 service TBT(ms)`；两种口径不会合并成一个 all-harness KPI。成本：Claude 为 harness 自报的权威值；Codex 为可选估算值（启用 `pricing` 后），响应用 `cost_estimated` 标记，前端在 codex/all 视图标注「含估算」。
 
-查询 API 设计与每个端点的 SQL 见 [`docs/plan-v2-query-api.md`](docs/plan-v2-query-api.md)。响应统一带 `Cache-Control: private, max-age=30`，所有时间窗按 `dashboard.timezone`（默认 `Asia/Shanghai`）切分。
+[`docs/plan-v2-query-api.md`](docs/plan-v2-query-api.md) 保留最初 Claude-only v1 的设计背景；当前多 harness 查询口径以 [`docs/protocol.md`](docs/protocol.md)、[`docs/models.md`](docs/models.md) 与 `internal/dashboard/` 实现为准。响应统一带 `Cache-Control: private, max-age=30`，所有时间窗按 `dashboard.timezone`（默认 `Asia/Shanghai`）切分。
 
 ```bash
 curl http://127.0.0.1:9100/internal/healthz   # liveness
@@ -317,7 +340,7 @@ go tool pprof http://127.0.0.1:9100/debug/pprof/heap
 
 | 现象 | 排查方向 |
 |---|---|
-| 服务收到数据，但所有表为空 | 看 `dispatched` 日志中的 `unknown` / `errors` 字段；Claude Code 升级可能引入新 metric / event |
+| 服务收到数据，但所有表为空 | 看 `dispatched` 日志中的 `unknown` / `errors` 字段；对应 harness 升级可能引入新 metric / event |
 | 数据延迟入库 | 调小 `ingest.flush_interval`；或检查 `/internal/stats` 中 `pending` 是否堆积 |
 | `flush_errors` 非零 | 看 server 日志 ERROR；通常是磁盘满或文件损坏 |
 | 重启后 `attrs` 抽不出字段 | 老版本 `attrs` 列曾用 `JSON` 类型导致双重转义；当前是 `VARCHAR`，旧数据需清表重新写入 |
