@@ -21,7 +21,7 @@ import (
 	"time"
 )
 
-func TestCheckFindsLatestStableReleaseForCurrentPlatform(t *testing.T) {
+func TestLatestFindsLatestStableReleaseForCurrentPlatform(t *testing.T) {
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -30,7 +30,7 @@ func TestCheckFindsLatestStableReleaseForCurrentPlatform(t *testing.T) {
 			"draft":false,
 			"prerelease":false,
 			"assets":[
-				{"name":"claude-code-monitor_v2.7.0_linux-amd64.tar.gz","browser_download_url":%q},
+				{"name":"agents-otel-monitor_v2.7.0_linux-amd64.tar.gz","browser_download_url":%q},
 				{"name":"checksums.txt","browser_download_url":%q}
 			]
 		}`, server.URL+"/archive", server.URL+"/checksums.txt")))
@@ -38,7 +38,7 @@ func TestCheckFindsLatestStableReleaseForCurrentPlatform(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	client := testUpdater(server.Client(), server.URL, false)
-	available, err := client.Check(context.Background(), "v2.6.0")
+	available, err := client.Latest(context.Background())
 	if err != nil {
 		t.Fatalf("check update: %v", err)
 	}
@@ -50,31 +50,7 @@ func TestCheckFindsLatestStableReleaseForCurrentPlatform(t *testing.T) {
 	}
 }
 
-func TestCheckAcceptsMajorMinorVersionFromVersionFile(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		writeHTTPResponse(t, w, []byte(`{
-			"tag_name":"v3.0.0",
-			"draft":false,
-			"prerelease":false,
-			"assets":[]
-		}`))
-	}))
-	t.Cleanup(server.Close)
-
-	available, err := testUpdater(server.Client(), server.URL, false).Check(
-		context.Background(),
-		"3.0",
-	)
-	if err != nil {
-		t.Fatalf("check VERSION-style current version: %v", err)
-	}
-	if available != nil {
-		t.Fatalf("available = %+v, want nil for equivalent v3.0.0 release", available)
-	}
-}
-
-func TestCheckRejectsHTTPSRedirectToHTTPBeforeFollowing(t *testing.T) {
+func TestLatestRejectsHTTPSRedirectToHTTPBeforeFollowing(t *testing.T) {
 	insecureRequested := false
 	insecureServer := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		insecureRequested = true
@@ -87,7 +63,7 @@ func TestCheckRejectsHTTPSRedirectToHTTPBeforeFollowing(t *testing.T) {
 	t.Cleanup(secureServer.Close)
 
 	client := testUpdater(secureServer.Client(), secureServer.URL, true)
-	_, err := client.Check(context.Background(), "v2.6.0")
+	_, err := client.Latest(context.Background())
 	if err == nil {
 		t.Fatal("check followed an HTTPS-to-HTTP redirect")
 	}
@@ -99,12 +75,12 @@ func TestCheckRejectsHTTPSRedirectToHTTPBeforeFollowing(t *testing.T) {
 	}
 }
 
-func TestCheckRejectsNonHTTPSReleaseAssetURLs(t *testing.T) {
+func TestLatestRejectsNonHTTPSReleaseAssetURLs(t *testing.T) {
 	secureServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeHTTPResponse(t, w, []byte(`{
 			"tag_name":"v2.7.0",
 			"assets":[
-				{"name":"claude-code-monitor_v2.7.0_linux-amd64.tar.gz","browser_download_url":"http://example.invalid/archive"},
+				{"name":"agents-otel-monitor_v2.7.0_linux-amd64.tar.gz","browser_download_url":"http://example.invalid/archive"},
 				{"name":"checksums.txt","browser_download_url":"https://example.invalid/checksums.txt"}
 			]
 		}`))
@@ -112,7 +88,7 @@ func TestCheckRejectsNonHTTPSReleaseAssetURLs(t *testing.T) {
 	t.Cleanup(secureServer.Close)
 
 	client := testUpdater(secureServer.Client(), secureServer.URL, true)
-	_, err := client.Check(context.Background(), "v2.6.0")
+	_, err := client.Latest(context.Background())
 	if err == nil {
 		t.Fatal("check accepted a non-HTTPS release asset URL")
 	}
@@ -121,25 +97,7 @@ func TestCheckRejectsNonHTTPSReleaseAssetURLs(t *testing.T) {
 	}
 }
 
-func TestCheckSkipsDevelopmentBuildWithoutNetworkAccess(t *testing.T) {
-	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		t.Fatal("development build must not contact GitHub")
-		return nil, nil
-	})}
-
-	available, err := testUpdater(client, "https://api.github.invalid/latest", true).Check(
-		context.Background(),
-		"dev",
-	)
-	if err != nil {
-		t.Fatalf("check development build: %v", err)
-	}
-	if available != nil {
-		t.Fatalf("available = %+v, want nil", available)
-	}
-}
-
-func TestCheckSkipsUnsupportedPlatformWithoutNetworkAccess(t *testing.T) {
+func TestLatestRejectsUnsupportedPlatformWithoutNetworkAccess(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		t.Fatal("unsupported platform must not contact GitHub")
 		return nil, nil
@@ -151,12 +109,9 @@ func TestCheckSkipsUnsupportedPlatformWithoutNetworkAccess(t *testing.T) {
 		goos:             "darwin",
 		goarch:           "amd64",
 		requireHTTPS:     true,
-	}).Check(
-		context.Background(),
-		"v2.6.0",
-	)
-	if err != nil {
-		t.Fatalf("check unsupported platform: %v", err)
+	}).Latest(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "darwin-amd64") {
+		t.Fatalf("unsupported platform error = %v, want platform-specific error", err)
 	}
 	if available != nil {
 		t.Fatalf("available = %+v, want nil", available)
@@ -166,7 +121,7 @@ func TestCheckSkipsUnsupportedPlatformWithoutNetworkAccess(t *testing.T) {
 func TestInstallAtomicallyReplacesExecutableAfterChecksumVerification(t *testing.T) {
 	const (
 		version     = "v2.7.0"
-		archiveName = "claude-code-monitor_v2.7.0_linux-amd64.tar.gz"
+		archiveName = "agents-otel-monitor_v2.7.0_linux-amd64.tar.gz"
 	)
 	archive := makeReleaseArchive(t, archiveName, []byte("new executable"))
 	digest := sha256.Sum256(archive)
@@ -193,17 +148,17 @@ func TestInstallAtomicallyReplacesExecutableAfterChecksumVerification(t *testing
 	}))
 	t.Cleanup(server.Close)
 
-	executablePath := filepath.Join(t.TempDir(), "claude-code-monitor")
+	executablePath := filepath.Join(t.TempDir(), "agents-otel-monitor")
 	if err := os.WriteFile(executablePath, []byte("old executable"), 0o750); err != nil {
 		t.Fatalf("write current executable: %v", err)
 	}
 
 	client := testUpdater(server.Client(), server.URL+"/latest", false)
-	available, err := client.Check(context.Background(), "v2.6.0")
+	available, err := client.Latest(context.Background())
 	if err != nil {
 		t.Fatalf("check update: %v", err)
 	}
-	installedPath, err := client.Install(context.Background(), available, executablePath)
+	installedPath, err := client.Install(context.Background(), available, filepath.Dir(executablePath))
 	if err != nil {
 		t.Fatalf("install update: %v", err)
 	}
@@ -236,7 +191,7 @@ func TestInstallAtomicallyReplacesExecutableAfterChecksumVerification(t *testing
 }
 
 func TestInstallLeavesExecutableUntouchedWhenChecksumDoesNotMatch(t *testing.T) {
-	const archiveName = "claude-code-monitor_v2.7.0_linux-amd64.tar.gz"
+	const archiveName = "agents-otel-monitor_v2.7.0_linux-amd64.tar.gz"
 	archive := makeReleaseArchive(t, archiveName, []byte("untrusted executable"))
 	wrongDigest := sha256.Sum256([]byte("different archive"))
 
@@ -252,7 +207,7 @@ func TestInstallLeavesExecutableUntouchedWhenChecksumDoesNotMatch(t *testing.T) 
 	}))
 	t.Cleanup(server.Close)
 
-	executablePath := filepath.Join(t.TempDir(), "claude-code-monitor")
+	executablePath := filepath.Join(t.TempDir(), "agents-otel-monitor")
 	if err := os.WriteFile(executablePath, []byte("trusted executable"), 0o755); err != nil {
 		t.Fatalf("write current executable: %v", err)
 	}
@@ -262,7 +217,7 @@ func TestInstallLeavesExecutableUntouchedWhenChecksumDoesNotMatch(t *testing.T) 
 		archiveName: archiveName,
 		archiveURL:  server.URL + "/archive",
 		checksumURL: server.URL + "/checksums.txt",
-	}, executablePath)
+	}, filepath.Dir(executablePath))
 	if err == nil {
 		t.Fatal("install update succeeded with a mismatched checksum")
 	}
@@ -277,8 +232,8 @@ func TestInstallLeavesExecutableUntouchedWhenChecksumDoesNotMatch(t *testing.T) 
 }
 
 func TestInstallRejectsUnsafeArchivePathsWithoutReplacingExecutable(t *testing.T) {
-	const archiveName = "claude-code-monitor_v2.7.0_linux-amd64.tar.gz"
-	archive := makeArchiveEntry(t, "../claude-code-monitor", []byte("unsafe executable"))
+	const archiveName = "agents-otel-monitor_v2.7.0_linux-amd64.tar.gz"
+	archive := makeArchiveEntry(t, "../agents-otel-monitor", []byte("unsafe executable"))
 	digest := sha256.Sum256(archive)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -293,7 +248,7 @@ func TestInstallRejectsUnsafeArchivePathsWithoutReplacingExecutable(t *testing.T
 	}))
 	t.Cleanup(server.Close)
 
-	executablePath := filepath.Join(t.TempDir(), "claude-code-monitor")
+	executablePath := filepath.Join(t.TempDir(), "agents-otel-monitor")
 	if err := os.WriteFile(executablePath, []byte("current executable"), 0o755); err != nil {
 		t.Fatalf("write current executable: %v", err)
 	}
@@ -303,7 +258,7 @@ func TestInstallRejectsUnsafeArchivePathsWithoutReplacingExecutable(t *testing.T
 		archiveName: archiveName,
 		archiveURL:  server.URL + "/archive",
 		checksumURL: server.URL + "/checksums.txt",
-	}, executablePath)
+	}, filepath.Dir(executablePath))
 	if err == nil {
 		t.Fatal("install update accepted an unsafe archive path")
 	}
@@ -317,120 +272,10 @@ func TestInstallRejectsUnsafeArchivePathsWithoutReplacingExecutable(t *testing.T
 	}
 }
 
-func TestRunStartupPromptsAndInstallsWhenUserConfirms(t *testing.T) {
-	const (
-		version     = "v2.7.0"
-		archiveName = "claude-code-monitor_v2.7.0_linux-amd64.tar.gz"
-	)
-	archive := makeReleaseArchive(t, archiveName, []byte("confirmed update"))
-	digest := sha256.Sum256(archive)
-
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/latest":
-			w.Header().Set("Content-Type", "application/json")
-			writeHTTPResponse(t, w, []byte(fmt.Sprintf(`{
-				"tag_name":%q,
-				"assets":[
-					{"name":%q,"browser_download_url":%q},
-					{"name":"checksums.txt","browser_download_url":%q}
-				]
-			}`, version, archiveName, server.URL+"/archive", server.URL+"/checksums.txt")))
-		case "/archive":
-			writeHTTPResponse(t, w, archive)
-		case "/checksums.txt":
-			writeHTTPResponse(t, w, []byte(fmt.Sprintf("%x  %s\n", digest, archiveName)))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
-
-	executablePath := filepath.Join(t.TempDir(), "claude-code-monitor")
-	if err := os.WriteFile(executablePath, []byte("old executable"), 0o755); err != nil {
-		t.Fatalf("write current executable: %v", err)
-	}
-	var output strings.Builder
-	client := testUpdater(server.Client(), server.URL+"/latest", false)
-
-	result, err := client.RunStartup(context.Background(), StartupOptions{
-		CurrentVersion: "v2.6.0",
-		Interactive:    true,
-		Input:          strings.NewReader("y\n"),
-		Output:         &output,
-		ExecutablePath: executablePath,
-	})
-	if err != nil {
-		t.Fatalf("run startup update: %v", err)
-	}
-	if !result.Updated || result.Version != version {
-		t.Fatalf("result = %+v, want updated %s", result, version)
-	}
-	if !strings.Contains(output.String(), "[y/N]") {
-		t.Fatalf("output = %q, want confirmation prompt", output.String())
-	}
-	got, err := os.ReadFile(executablePath)
-	if err != nil {
-		t.Fatalf("read updated executable: %v", err)
-	}
-	if want := "confirmed update"; string(got) != want {
-		t.Fatalf("executable = %q, want %q", got, want)
-	}
-}
-
-func TestRunStartupOnlyNotifiesWithoutDownloadingWhenNonInteractive(t *testing.T) {
-	const archiveName = "claude-code-monitor_v2.7.0_linux-amd64.tar.gz"
-	archiveRequested := false
-
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/latest":
-			w.Header().Set("Content-Type", "application/json")
-			writeHTTPResponse(t, w, []byte(fmt.Sprintf(`{
-				"tag_name":"v2.7.0",
-				"assets":[
-					{"name":%q,"browser_download_url":%q},
-					{"name":"checksums.txt","browser_download_url":%q}
-				]
-			}`, archiveName, server.URL+"/archive", server.URL+"/checksums.txt")))
-		case "/archive", "/checksums.txt":
-			archiveRequested = true
-			http.Error(w, "must not download", http.StatusInternalServerError)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
-
-	var output strings.Builder
-	result, err := testUpdater(server.Client(), server.URL+"/latest", false).RunStartup(
-		context.Background(),
-		StartupOptions{
-			CurrentVersion: "v2.6.0",
-			Interactive:    false,
-			Output:         &output,
-		},
-	)
-	if err != nil {
-		t.Fatalf("run non-interactive startup update: %v", err)
-	}
-	if result.Updated {
-		t.Fatalf("result = %+v, want notification only", result)
-	}
-	if archiveRequested {
-		t.Fatal("non-interactive check downloaded release assets")
-	}
-	if !strings.Contains(output.String(), "v2.7.0") {
-		t.Fatalf("output = %q, want latest version notice", output.String())
-	}
-}
-
 func makeReleaseArchive(t *testing.T, archiveName string, executable []byte) []byte {
 	t.Helper()
 	root := archiveName[:len(archiveName)-len(".tar.gz")]
-	return makeArchiveEntry(t, root+"/claude-code-monitor", executable)
+	return makeArchiveEntry(t, root+"/agents-otel-monitor", executable)
 }
 
 func writeHTTPResponse(t *testing.T, w http.ResponseWriter, contents []byte) {

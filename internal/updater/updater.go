@@ -3,7 +3,7 @@
  * @since v2.6.0
  */
 
-// Package updater discovers and installs official claude-code-monitor releases.
+// Package updater discovers and installs official agents-otel-monitor releases.
 package updater
 
 import (
@@ -14,14 +14,15 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
-	"strings"
 
+	"github.com/kuroky/claude-code-monitor/internal/buildinfo"
 	"golang.org/x/mod/semver"
 )
 
-const latestReleaseEndpoint = "https://api.github.com/repos/kurok1/claude-code-monitor/releases/latest"
+const latestReleaseEndpoint = "https://api.github.com/repos/Kurok1/agents-otel-monitor/releases/latest"
+const legacyBinaryName = "claude-code-monitor"
 
-// Available describes a newer release and the assets required to install it.
+// Available describes a stable release and the assets required to install it.
 type Available struct {
 	Version string
 
@@ -80,20 +81,12 @@ func newUpdater(options updaterOptions) *Updater {
 	}
 }
 
-// Check returns the latest stable release when it is newer than currentVersion.
-// A nil result means the current version is already latest or the platform is
-// not distributed as an official binary.
-func (u *Updater) Check(ctx context.Context, currentVersion string) (*Available, error) {
-	if currentVersion == "dev" {
-		return nil, nil
-	}
+// Latest returns the latest stable release for this platform, independently
+// of the calling executable's version or any previously installed release.
+func (u *Updater) Latest(ctx context.Context) (*Available, error) {
 	target, ok := releaseTarget(u.goos, u.goarch)
 	if !ok {
-		return nil, nil
-	}
-	comparableVersion, err := normalizeCurrentVersion(currentVersion)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("no official release binary for %s-%s", u.goos, u.goarch)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.latestReleaseURL, nil)
@@ -102,7 +95,7 @@ func (u *Updater) Check(ctx context.Context, currentVersion string) (*Available,
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	req.Header.Set("User-Agent", "claude-code-monitor/"+currentVersion)
+	req.Header.Set("User-Agent", buildinfo.BinaryName+"-updater")
 
 	resp, err := u.do(req)
 	if err != nil {
@@ -123,19 +116,27 @@ func (u *Updater) Check(ctx context.Context, currentVersion string) (*Available,
 	if !semver.IsValid(release.TagName) {
 		return nil, fmt.Errorf("latest release tag %q is not valid semver", release.TagName)
 	}
-	if semver.Compare(release.TagName, comparableVersion) <= 0 {
-		return nil, nil
-	}
-
-	archiveName := fmt.Sprintf("claude-code-monitor_%s_%s.tar.gz", release.TagName, target)
+	archiveName := fmt.Sprintf("%s_%s_%s.tar.gz", buildinfo.BinaryName, release.TagName, target)
+	legacyArchiveName := fmt.Sprintf("%s_%s_%s.tar.gz", legacyBinaryName, release.TagName, target)
 	available := &Available{Version: release.TagName, archiveName: archiveName}
+	var legacyArchiveURL string
+	var hasCurrentArchive bool
 	for _, asset := range release.Assets {
 		switch asset.Name {
 		case archiveName:
 			available.archiveURL = asset.URL
+			hasCurrentArchive = true
+		case legacyArchiveName:
+			legacyArchiveURL = asset.URL
 		case "checksums.txt":
 			available.checksumURL = asset.URL
 		}
+	}
+	// Prefer the current name regardless of asset order. A malformed current
+	// asset must fail validation rather than silently selecting a legacy asset.
+	if !hasCurrentArchive && legacyArchiveURL != "" {
+		available.archiveName = legacyArchiveName
+		available.archiveURL = legacyArchiveURL
 	}
 	if available.archiveURL == "" {
 		return nil, fmt.Errorf("release %s has no %s asset", release.TagName, archiveName)
@@ -144,37 +145,12 @@ func (u *Updater) Check(ctx context.Context, currentVersion string) (*Available,
 		return nil, fmt.Errorf("release %s has no checksums.txt asset", release.TagName)
 	}
 	if err := u.validateURLString(available.archiveURL); err != nil {
-		return nil, fmt.Errorf("validate %s asset URL: %w", archiveName, err)
+		return nil, fmt.Errorf("validate %s asset URL: %w", available.archiveName, err)
 	}
 	if err := u.validateURLString(available.checksumURL); err != nil {
 		return nil, fmt.Errorf("validate checksums.txt asset URL: %w", err)
 	}
 	return available, nil
-}
-
-func normalizeCurrentVersion(currentVersion string) (string, error) {
-	version := strings.TrimSpace(currentVersion)
-	if semver.IsValid(version) {
-		return version, nil
-	}
-	if !strings.HasPrefix(version, "v") {
-		version = "v" + version
-	}
-	if semver.IsValid(version) {
-		return version, nil
-	}
-
-	core, suffix := version, ""
-	if index := strings.IndexAny(core, "-+"); index >= 0 {
-		core, suffix = core[:index], core[index:]
-	}
-	if strings.Count(strings.TrimPrefix(core, "v"), ".") == 1 {
-		version = core + ".0" + suffix
-		if semver.IsValid(version) {
-			return version, nil
-		}
-	}
-	return "", fmt.Errorf("current version %q is not valid semver", currentVersion)
 }
 
 func (u *Updater) do(req *http.Request) (*http.Response, error) {

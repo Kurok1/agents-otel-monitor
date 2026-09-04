@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/kuroky/claude-code-monitor/internal/buildinfo"
 )
 
 const (
@@ -27,29 +30,30 @@ const (
 	maxBinarySize   = 512 << 20
 )
 
-// Install downloads, verifies, and atomically replaces executablePath with an
-// official release binary. The existing executable is untouched until the
-// final rename succeeds. It returns the absolute, symlink-resolved path that
-// was replaced so the caller can execute the installed binary directly.
-func (u *Updater) Install(ctx context.Context, available *Available, executablePath string) (string, error) {
+// Install downloads, verifies, and atomically installs the release binary in
+// installDir. It creates missing directories and returns the absolute installed
+// path. An existing regular file is preserved until the final rename succeeds.
+func (u *Updater) Install(ctx context.Context, available *Available, installDir string) (string, error) {
 	if available == nil {
 		return "", fmt.Errorf("install update: no release selected")
 	}
 
-	resolvedPath, err := filepath.EvalSymlinks(executablePath)
-	if err != nil {
-		return "", fmt.Errorf("resolve executable path %s: %w", executablePath, err)
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("install update: %w", err)
 	}
-	resolvedPath, err = filepath.Abs(resolvedPath)
-	if err != nil {
-		return "", fmt.Errorf("make executable path absolute: %w", err)
+	if installDir == "" {
+		return "", fmt.Errorf("install directory must not be empty")
 	}
-	currentInfo, err := os.Stat(resolvedPath)
+	absoluteDir, err := filepath.Abs(installDir)
 	if err != nil {
-		return "", fmt.Errorf("stat current executable %s: %w", resolvedPath, err)
+		return "", fmt.Errorf("make install directory absolute: %w", err)
 	}
-	if !currentInfo.Mode().IsRegular() {
-		return "", fmt.Errorf("current executable %s is not a regular file", resolvedPath)
+	if err := os.MkdirAll(absoluteDir, 0o755); err != nil {
+		return "", fmt.Errorf("create install directory %s: %w", absoluteDir, err)
+	}
+	resolvedPath := filepath.Join(absoluteDir, buildinfo.BinaryName)
+	if _, err := executablePermissions(resolvedPath); err != nil {
+		return "", err
 	}
 
 	checksums, err := u.download(ctx, available.checksumURL, maxChecksumSize)
@@ -70,7 +74,7 @@ func (u *Updater) Install(ctx context.Context, available *Available, executableP
 		return "", fmt.Errorf("verify %s checksum: got %x, want %x", available.archiveName, gotDigest, wantDigest)
 	}
 
-	temp, err := os.CreateTemp(filepath.Dir(resolvedPath), ".claude-code-monitor-update-*")
+	temp, err := os.CreateTemp(filepath.Dir(resolvedPath), "."+buildinfo.BinaryName+"-update-*")
 	if err != nil {
 		return "", fmt.Errorf("create replacement executable: %w", err)
 	}
@@ -82,12 +86,22 @@ func (u *Updater) Install(ctx context.Context, available *Available, executableP
 		}
 	}()
 
-	expectedPath := strings.TrimSuffix(available.archiveName, ".tar.gz") + "/claude-code-monitor"
+	executableName := buildinfo.BinaryName
+	if strings.HasPrefix(available.archiveName, legacyBinaryName+"_") {
+		executableName = legacyBinaryName
+	}
+	expectedPath := strings.TrimSuffix(available.archiveName, ".tar.gz") + "/" + executableName
 	if err := extractExecutable(archive, expectedPath, temp); err != nil {
 		_ = temp.Close() // Preserve the extraction error; cleanup removes the temporary file.
 		return "", fmt.Errorf("extract release executable: %w", err)
 	}
-	if err := temp.Chmod(currentInfo.Mode().Perm()); err != nil {
+	// Recheck the target after downloading, before committing the replacement.
+	permissions, err := executablePermissions(resolvedPath)
+	if err != nil {
+		_ = temp.Close() // Preserve the target error; cleanup removes the temporary file.
+		return "", err
+	}
+	if err := temp.Chmod(permissions); err != nil {
 		_ = temp.Close() // Preserve the chmod error; cleanup removes the temporary file.
 		return "", fmt.Errorf("preserve executable permissions: %w", err)
 	}
@@ -98,6 +112,9 @@ func (u *Updater) Install(ctx context.Context, available *Available, executableP
 	if err := temp.Close(); err != nil {
 		return "", fmt.Errorf("close replacement executable: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("install update: %w", err)
+	}
 	if err := os.Rename(tempPath, resolvedPath); err != nil {
 		return "", fmt.Errorf("replace executable %s: %w", resolvedPath, err)
 	}
@@ -105,12 +122,26 @@ func (u *Updater) Install(ctx context.Context, available *Available, executableP
 	return resolvedPath, nil
 }
 
+func executablePermissions(target string) (os.FileMode, error) {
+	info, err := os.Lstat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0o755, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("inspect install target %s: %w", target, err)
+	}
+	if !info.Mode().IsRegular() {
+		return 0, fmt.Errorf("install target %s is not a regular file (symlinks and directories are not supported)", target)
+	}
+	return info.Mode().Perm(), nil
+}
+
 func (u *Updater) download(ctx context.Context, url string, limit int64) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("User-Agent", "claude-code-monitor-updater")
+	req.Header.Set("User-Agent", buildinfo.BinaryName+"-updater")
 
 	resp, err := u.do(req)
 	if err != nil {
@@ -180,7 +211,7 @@ func extractExecutable(archive []byte, expectedPath string, dst io.Writer) error
 		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
 			return fmt.Errorf("archive executable %s is not a regular file", expectedPath)
 		}
-		if header.Size < 0 || header.Size > maxBinarySize {
+		if header.Size <= 0 || header.Size > maxBinarySize {
 			return fmt.Errorf("archive executable size %d is outside allowed range", header.Size)
 		}
 		written, err := io.Copy(dst, tarReader)

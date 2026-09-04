@@ -112,10 +112,10 @@ jobs:
           set -euo pipefail
           PROJECT_VERSION="$(tr -d '[:space:]' < VERSION)"
           mkdir -p dist
-          NAME="claude-code-monitor_${RELEASE_TAG}_${{ matrix.target }}"
+          NAME="agents-otel-monitor_${RELEASE_TAG}_${{ matrix.target }}"
           go build -trimpath \
             -ldflags "-s -w -X github.com/kuroky/claude-code-monitor/internal/buildinfo.version=${PROJECT_VERSION}" \
-            -o "dist/${NAME}/claude-code-monitor${{ matrix.ext }}" ./cmd/server
+            -o "dist/${NAME}/agents-otel-monitor${{ matrix.ext }}" ./cmd/server
           cp config.example.yaml "dist/${NAME}/"
           # Bundle the LiteLLM price table so `pricing.source_file: ./pricing/litellm.json`
           # works out of the box from the extracted archive. Fetched at build time

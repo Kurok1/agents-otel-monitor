@@ -21,13 +21,13 @@ import (
 	"github.com/kuroky/claude-code-monitor/internal/pricing"
 	"github.com/kuroky/claude-code-monitor/internal/stats"
 	"github.com/kuroky/claude-code-monitor/internal/store"
+	"github.com/kuroky/claude-code-monitor/internal/updater"
 	"github.com/kuroky/claude-code-monitor/internal/web"
 )
 
 const shutdownTimeout = 30 * time.Second
 
 type commandStreams struct {
-	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
 }
@@ -35,12 +35,10 @@ type commandStreams struct {
 type serverOptions struct {
 	configPath    string
 	skipIfRunning bool
-	noUpdateCheck bool
 }
 
 func main() {
 	streams := commandStreams{
-		stdin:  os.Stdin,
 		stdout: os.Stdout,
 		stderr: os.Stderr,
 	}
@@ -57,7 +55,12 @@ func run(ctx context.Context, args []string, streams commandStreams) error {
 		}
 		return nil
 	}
-	err := runServer(ctx, args, streams)
+	var err error
+	if len(args) > 0 && args[0] == "update" {
+		err = runUpdate(ctx, args[1:], streams, updater.New())
+	} else {
+		err = runServer(ctx, args, streams)
+	}
 	if errors.Is(err, flag.ErrHelp) {
 		return nil
 	}
@@ -77,19 +80,6 @@ func runServer(ctx context.Context, args []string, streams commandStreams) error
 
 	logging.Setup(cfg.Logging)
 
-	// Hook integrations that want idempotent spawns must exit before the
-	// startup update check performs any network access.
-	if options.skipIfRunning && alreadyListening(cfg.Server.GRPCListen) {
-		logSkipIfRunning(cfg.Server.GRPCListen)
-		return nil
-	}
-
-	if startupUpdateEnabled(options, os.Getenv) {
-		maybeApplyStartupUpdate(ctx, args, streams)
-	}
-
-	// Probe after the prompt because an instance that existed before the
-	// update check may have exited while waiting for user confirmation.
 	if alreadyListening(cfg.Server.GRPCListen) {
 		if options.skipIfRunning {
 			logSkipIfRunning(cfg.Server.GRPCListen)
@@ -196,12 +186,17 @@ func runServer(ctx context.Context, args []string, streams commandStreams) error
 
 func parseServerOptions(args []string, stderr io.Writer) (serverOptions, error) {
 	var options serverOptions
-	flags := flag.NewFlagSet("claude-code-monitor", flag.ContinueOnError)
+	flags := flag.NewFlagSet(buildinfo.BinaryName, flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	flags.Usage = func() {
+		// flag's Usage callback cannot return output errors.
+		_, _ = fmt.Fprintf(flags.Output(), "Usage:\n  %[1]s [server flags]\n  %[1]s version\n  %[1]s update [--install-dir DIR]\n\nServer flags:\n", buildinfo.BinaryName)
+		flags.PrintDefaults()
+	}
 	flags.StringVar(&options.configPath, "config", "./config.yaml", "path to YAML config file")
 	flags.BoolVar(&options.skipIfRunning, "skip-if-running", false,
 		"if another instance is already listening on grpc_listen, exit 0 instead of restarting it (used by SessionStart hooks)")
-	flags.BoolVar(&options.noUpdateCheck, "no-update-check", false, "skip the startup GitHub release check")
+	flags.Bool("no-update-check", false, "deprecated; accepted for compatibility, startup never checks for updates")
 	if err := flags.Parse(args); err != nil {
 		return serverOptions{}, fmt.Errorf("parse flags: %w", err)
 	}
@@ -209,10 +204,6 @@ func parseServerOptions(args []string, stderr io.Writer) (serverOptions, error) 
 		return serverOptions{}, fmt.Errorf("unexpected command or argument %q", flags.Arg(0))
 	}
 	return options, nil
-}
-
-func startupUpdateEnabled(options serverOptions, getenv func(string) string) bool {
-	return !options.noUpdateCheck && getenv("CLAUDE_CODE_MONITOR_NO_UPDATE_CHECK") != "1"
 }
 
 func logSkipIfRunning(grpcListen string) {

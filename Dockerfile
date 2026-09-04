@@ -68,8 +68,7 @@ VOLUME ["/data"]
 # 4317 = OTLP gRPC ingest, 9100 = stats + dashboard API + embedded web UI
 EXPOSE 4317 9100
 
-ENV TZ=Asia/Shanghai \
-    CLAUDE_CODE_MONITOR_NO_UPDATE_CHECK=1
+ENV TZ=Asia/Shanghai
 
 ENTRYPOINT ["/usr/local/bin/server"]
 CMD ["-config", "/etc/claude-code-monitor/config.yaml"]
