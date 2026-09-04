@@ -7,80 +7,82 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/kuroky/claude-code-monitor/internal/buildinfo"
 	"github.com/kuroky/claude-code-monitor/internal/updater"
-	"golang.org/x/term"
 )
 
-type processExec func(path string, argv, environment []string) error
+const (
+	releaseQueryTimeout = 5 * time.Second
+	installTimeout      = 2 * time.Minute
+)
 
-type restartRuntime struct {
-	argv        []string
-	environment []string
-	output      io.Writer
-	exec        processExec
+type releaseInstaller interface {
+	Latest(context.Context) (*updater.Available, error)
+	Install(context.Context, *updater.Available, string) (string, error)
 }
 
-func maybeApplyStartupUpdate(ctx context.Context, args []string, streams commandStreams) {
-	executablePath, err := os.Executable()
-	if err != nil {
-		writeUpdateWarning(streams.stderr, fmt.Errorf("resolve current executable: %w", err))
-		return
-	}
-	argv := make([]string, 0, len(args)+1)
-	argv = append(argv, os.Args[0])
-	argv = append(argv, args...)
-	result, err := updater.New().RunStartup(ctx, updater.StartupOptions{
-		CurrentVersion: buildinfo.Version(),
-		Interactive:    streamsAreInteractive(streams.stdin, streams.stderr),
-		Input:          streams.stdin,
-		Output:         streams.stderr,
-		ExecutablePath: executablePath,
-	})
-	if err != nil {
-		writeUpdateWarning(streams.stderr, fmt.Errorf("startup update: %w", err))
-		return
-	}
-	if err := restartAfterUpdate(result, restartRuntime{
-		argv:        argv,
-		environment: os.Environ(),
-		output:      streams.stderr,
-		exec:        reexec,
-	}); err != nil {
-		writeUpdateWarning(streams.stderr, err)
-	}
+type updateOptions struct {
+	installDir string
 }
 
-func restartAfterUpdate(result updater.StartupResult, runtime restartRuntime) error {
-	if !result.Updated {
-		return nil
+func runUpdate(ctx context.Context, args []string, streams commandStreams, installer releaseInstaller) error {
+	options, err := parseUpdateOptions(args, streams.stderr)
+	if err != nil {
+		return err
 	}
-	if result.ExecutablePath == "" {
-		return fmt.Errorf("restart updated executable: installed path is empty")
+	signalCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	queryCtx, cancelQuery := context.WithTimeout(signalCtx, releaseQueryTimeout)
+	available, err := installer.Latest(queryCtx)
+	cancelQuery()
+	if err != nil {
+		return fmt.Errorf("query latest release: %w", err)
 	}
-	if _, err := fmt.Fprintf(runtime.output, "Updated to %s; restarting...\n", result.Version); err != nil {
-		return fmt.Errorf("write restart notice: %w", err)
+	if _, err := fmt.Fprintf(streams.stderr, "Installing %s into %s...\n", available.Version, options.installDir); err != nil {
+		return fmt.Errorf("write install progress: %w", err)
 	}
-	if err := runtime.exec(result.ExecutablePath, runtime.argv, runtime.environment); err != nil {
-		return fmt.Errorf("run updated executable: %w", err)
+	installCtx, cancelInstall := context.WithTimeout(signalCtx, installTimeout)
+	defer cancelInstall()
+	installedPath, err := installer.Install(installCtx, available, options.installDir)
+	if err != nil {
+		return fmt.Errorf("install release %s: %w", available.Version, err)
+	}
+	if _, err := fmt.Fprintf(streams.stdout, "Installed %s to %s\nRunning services continue using their current version until restarted.\n", available.Version, installedPath); err != nil {
+		return fmt.Errorf("write install result: %w", err)
 	}
 	return nil
 }
 
-func streamsAreInteractive(input io.Reader, output io.Writer) bool {
-	inputFile, inputOK := input.(*os.File)
-	outputFile, outputOK := output.(*os.File)
-	return inputOK && outputOK &&
-		term.IsTerminal(int(inputFile.Fd())) && term.IsTerminal(int(outputFile.Fd()))
-}
-
-func writeUpdateWarning(output io.Writer, err error) {
-	if _, writeErr := fmt.Fprintf(output, "warning: automatic update skipped: %v\n", err); writeErr != nil {
-		// Startup updates are fail-open, including when their warning stream is unavailable.
-		return
+func parseUpdateOptions(args []string, stderr io.Writer) (updateOptions, error) {
+	var options updateOptions
+	flags := flag.NewFlagSet(buildinfo.BinaryName+" update", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.StringVar(&options.installDir, "install-dir", ".", "installation directory (defaults to the current working directory)")
+	if err := flags.Parse(args); err != nil {
+		return updateOptions{}, fmt.Errorf("parse update flags: %w", err)
 	}
+	if flags.NArg() != 0 {
+		return updateOptions{}, fmt.Errorf("unexpected update argument %q", flags.Arg(0))
+	}
+	if options.installDir == "" {
+		return updateOptions{}, fmt.Errorf("install-dir must not be empty")
+	}
+	if !filepath.IsAbs(options.installDir) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return updateOptions{}, fmt.Errorf("get working directory: %w", err)
+		}
+		options.installDir = filepath.Join(cwd, options.installDir)
+	}
+	options.installDir = filepath.Clean(options.installDir)
+	return options, nil
 }

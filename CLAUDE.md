@@ -18,7 +18,7 @@ This file provides repository guidance for coding agents working in this reposit
 | `claude` | 8 Metrics + 11 Events | 19 张历史无前缀表（`metric_*` / `event_*`） |
 | `codex` | 2 Metrics + 6 Events | 8 张 `codex_metric_*` / `codex_event_*` 表 |
 
-仓库名称已迁移；代码中的 Go module、二进制、`/version.service` 与部分兼容标识仍使用 `claude-code-monitor`。除非任务明确包含运行时迁移，不要只改其中一处造成协议、发布物与更新器命名不一致。
+仓库、发布归档和二进制使用 `agents-otel-monitor`；更新器兼容读取旧命名归档，统一安装为新文件名。Go module 与 `/version.service` 保留 `claude-code-monitor`，后者用于桌面端识别服务。变更发布物命名时同步更新打包脚本与更新器；模块与协议标识的迁移需单独明确范围。
 
 ---
 

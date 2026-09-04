@@ -11,7 +11,7 @@
 
 项目地址：[`github.com/Kurok1/agents-otel-monitor`](https://github.com/Kurok1/agents-otel-monitor)
 
-> **命名兼容说明**：仓库与项目名称已改为 `agents-otel-monitor`。当前发布二进制、Docker image、`/version` 的 `service` 值、更新检查环境变量和部分运行路径仍保留旧标识 `claude-code-monitor`；下文涉及这些实际接口时继续使用旧名，直至单独完成运行时标识迁移。
+> **命名兼容说明**：仓库、Release 归档、包内二进制及安装后的命令统一使用 `agents-otel-monitor`。Go module、`/version` 的 `service` 值、旧 Docker image 和部分运行路径保留 `claude-code-monitor`，以兼容现有集成。
 
 ---
 
@@ -96,7 +96,7 @@ grpc server listening  addr=127.0.0.1:4317
 
 浏览器访问 **`http://localhost:9100/`** 即可看到前端看板。**前提**：先在 `frontend/` 跑过 `npm run build`，二进制重新 `go build` 一次（前端产物通过 `//go:embed` 嵌入）。前端没构建时 server 启动日志里会有 `web UI not mounted`，`/` 会回落到原先的纯文本说明页。
 
-### 2.1 版本与启动更新
+### 2.1 版本与手动更新
 
 根目录 `VERSION` 是项目版本源；`./scripts/build-all.sh` 会把它注入二进制。服务运行后可读取同一个版本：
 
@@ -108,18 +108,31 @@ curl -s http://127.0.0.1:9100/version
 查看当前二进制版本（不会加载配置、检查更新或启动服务）：
 
 ```bash
-./claude-code-monitor version
-# 也支持：./claude-code-monitor --version
+./agents-otel-monitor version
+# 也支持：./agents-otel-monitor --version
 ```
 
-官方 GitHub Release 二进制会在服务启动前检查最新稳定版。交互终端发现新版本时显示 `[y/N]`；输入 `y` 后下载当前平台的 `tar.gz`，按 Release 的 `checksums.txt` 校验 SHA-256，在二进制同目录原子替换，然后以原参数、环境和工作目录继续启动新版本。
+Release 归档命名为 `agents-otel-monitor_<tag>_<platform>.tar.gz`，例如 `agents-otel-monitor_v3.0.1_darwin-arm64.tar.gz`；解压后的同名目录中包含 `agents-otel-monitor` 二进制、示例配置和计价文件。
 
-- 支持 `linux-amd64`、`linux-arm64`、`darwin-arm64`；源码构建默认版本为 `dev`，不会访问 GitHub。
-- 非交互启动（Hook、`nohup`、systemd 等）只打印升级提示，不下载或替换。
-- 检查超时、断网、校验失败或目录无写权限时仅打印 warning，继续启动当前版本；程序不会主动调用 `sudo`。
-- `-skip-if-running` 检测到已有实例时直接退出，不执行更新检查。
-- 可用 `--no-update-check` 或 `CLAUDE_CODE_MONITOR_NO_UPDATE_CHECK=1` 完全关闭启动检查。
-- Docker 镜像默认关闭二进制自更新；请拉取新镜像并重建容器。
+服务启动时不检查版本、不提示更新。通过独立的 `update` 命令安装 [官方 GitHub Release](https://github.com/Kurok1/agents-otel-monitor/releases) 的最新稳定版：
+
+```bash
+# 安装到执行命令时的工作目录（pwd）
+agents-otel-monitor update
+
+# 安装到指定目录；相对路径基于当前工作目录解析
+agents-otel-monitor update --install-dir="$HOME/.claude/monitor"
+agents-otel-monitor update --help
+```
+
+- 目标文件为 `<install-dir>/agents-otel-monitor`，目录不存在时自动创建。每次都安装最新稳定版，允许同版本重装，也支持 `dev` 构建调用。
+- 支持 `linux-amd64`、`linux-arm64`、`darwin-arm64`，其它平台明确报错。命令不加载服务配置、不启动服务、不要求交互确认。
+- 下载当前平台的 `tar.gz`，按 Release 的 `checksums.txt` 校验 SHA-256，在目标目录内原子替换二进制；配置、数据库、计价文件保持原样。新文件权限为 `0755`，替换普通文件时保留原权限，拒绝覆盖符号链接或目录。
+- 安装完成后输出版本及完整路径。运行中的服务继续使用原版本，需要在之后使用安装路径重新启动服务才能生效。
+- 查询超时为 5 秒，安装超时为 2 分钟。断网、校验失败或权限不足等错误会非零退出，清理临时文件并保留原二进制；程序不会主动调用 `sudo`。
+- `--no-update-check` 仅作为弃用的兼容参数接受，已无实际作用；`CLAUDE_CODE_MONITOR_NO_UPDATE_CHECK` 不再读取。
+- 更新器优先下载新命名的归档，也兼容旧 `claude-code-monitor_<tag>_<platform>.tar.gz` 及其包内旧文件名；安装目标始终为 `agents-otel-monitor`。已有 `claude-code-monitor` 文件会保留，启动脚本或 hook 需改为使用新路径才能在下次启动时使用新安装的程序。
+- 首次使用需先安装包含 `update` 命令的版本。Docker 部署仍建议拉取新镜像并重建容器。
 
 **端口已被占用时的默认行为是 restart**：server 启动前会探测 `grpc_listen`，若有其它进程在监听，用 `lsof` 查出 PID 后发 `SIGTERM`，等端口释放（最多 5s），仍未释放则升级为 `SIGKILL`（再等 2s）。开发时反复 `./bin/server` 不需要手动 `pkill`。
 
