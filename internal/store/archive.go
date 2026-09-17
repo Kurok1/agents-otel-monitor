@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kuroky/claude-code-monitor/internal/archivezone"
 )
 
 const archiveRetentionDays = 30
@@ -61,6 +63,7 @@ type ArchiveResult struct {
 type Archiver struct {
 	db             *DB
 	loc            *time.Location
+	timezone       string
 	log            *slog.Logger
 	archivePrefix  string
 	afterAggregate func() error
@@ -76,9 +79,9 @@ func NewArchiver(db *DB, timezone string, log *slog.Logger) (*Archiver, error) {
 	if db == nil || db.SQL == nil {
 		return nil, fmt.Errorf("archive requires an open database")
 	}
-	loc, err := time.LoadLocation(timezone)
+	loc, err := archivezone.Validate(timezone)
 	if err != nil {
-		return nil, fmt.Errorf("load archive timezone %q: %w", timezone, err)
+		return nil, fmt.Errorf("validate archive timezone %q: %w", timezone, err)
 	}
 	if log == nil {
 		log = slog.Default()
@@ -90,6 +93,7 @@ func NewArchiver(db *DB, timezone string, log *slog.Logger) (*Archiver, error) {
 	return &Archiver{
 		db:            db,
 		loc:           loc,
+		timezone:      timezone,
 		log:           log,
 		archivePrefix: quoteArchiveIdentifier(catalog) + ".archive.",
 	}, nil
@@ -149,6 +153,9 @@ func (a *Archiver) Stop() {
 // transaction, so failed or cancelled dates retain all their raw rows for a
 // later retry.
 func (a *Archiver) RunOnce(ctx context.Context, now time.Time) (ArchiveResult, error) {
+	if _, err := archivezone.ValidateAt(a.timezone, now); err != nil {
+		return ArchiveResult{}, fmt.Errorf("validate archive timezone before sweep: %w", err)
+	}
 	cutoff := archiveCutoff(now, a.loc)
 	result := ArchiveResult{Cutoff: cutoff}
 
@@ -160,15 +167,22 @@ func (a *Archiver) RunOnce(ctx context.Context, now time.Time) (ArchiveResult, e
 		a.recordState(ctx, result)
 		return result, nil
 	}
+	for _, day := range days {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if _, _, err := a.archiveDayBounds(day, cutoff); err != nil {
+			return result, err
+		}
+	}
 
 	for _, day := range days {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		start := day.UTC()
-		end := day.In(a.loc).AddDate(0, 0, 1).UTC()
-		if end.After(cutoff) {
-			end = cutoff
+		start, end, err := a.archiveDayBounds(day, cutoff)
+		if err != nil {
+			return result, err
 		}
 		deleted, hadRows, err := a.archiveDay(ctx, start, end)
 		if err != nil {
@@ -185,6 +199,21 @@ func (a *Archiver) RunOnce(ctx context.Context, now time.Time) (ArchiveResult, e
 		a.checkpoint(ctx)
 	}
 	return result, nil
+}
+
+func (a *Archiver) archiveDayBounds(day, cutoff time.Time) (time.Time, time.Time, error) {
+	start := day.UTC()
+	end := day.In(a.loc).AddDate(0, 0, 1).UTC()
+	if end.After(cutoff) {
+		end = cutoff
+	}
+	if !end.After(start) {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid archive day bounds for %s", start.Format(time.DateOnly))
+	}
+	if err := archivezone.ValidateInterval(a.loc, start, end); err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("validate archive day %s: %w", start.Format(time.DateOnly), err)
+	}
+	return start, end, nil
 }
 
 func archiveCutoff(now time.Time, loc *time.Location) time.Time {
@@ -258,6 +287,9 @@ func (a *Archiver) expiredDays(ctx context.Context, cutoff time.Time) ([]time.Ti
 }
 
 func (a *Archiver) archiveDay(ctx context.Context, start, end time.Time) (int64, bool, error) {
+	if err := archivezone.ValidateInterval(a.loc, start, end); err != nil {
+		return 0, false, fmt.Errorf("validate archive day %s: %w", start.Format(time.DateOnly), err)
+	}
 	a.db.writeMu.Lock()
 	defer a.db.writeMu.Unlock()
 

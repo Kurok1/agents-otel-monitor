@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/kuroky/claude-code-monitor/internal/archivezone"
 	"gopkg.in/yaml.v3"
 )
 
@@ -226,6 +227,11 @@ func validate(cfg *Config) error {
 	}
 	if _, err := time.LoadLocation(cfg.Dashboard.Timezone); err != nil {
 		return fmt.Errorf("dashboard.timezone %q: %w", cfg.Dashboard.Timezone, err)
+	}
+	if cfg.Archive.Enabled {
+		if _, err := archivezone.Validate(cfg.Dashboard.Timezone); err != nil {
+			return fmt.Errorf("archive.enabled requires a whole-hour dashboard.timezone: %w", err)
+		}
 	}
 	hm := cfg.Dashboard.Heatmap
 	if hm.WTokens < 0 || hm.WCost < 0 || hm.WRequests < 0 {

@@ -592,7 +592,7 @@ Codex 表族主要靠 `conversation_id` 组织会话，`call_id` 串联 tool_dec
 
 ### 5.6 数据保留
 
-启用 `archive.enabled` 后，服务在启动后后台补偿，并在 `dashboard.timezone` 的每天 03:00 处理过期的原始遥测。保留边界是本地今日零点前 30 个日历日，并额外保证原始行至少存活 30 × 24 小时。每个过期本地日独立事务：先累加写入 `archive` schema 的摘要，再删除该日所有 27 张原始表的行；失败会回滚整日。
+启用 `archive.enabled` 后，服务在启动后后台补偿，并在 `dashboard.timezone` 的每天 03:00 处理过期的原始遥测。归档要求该时区在前后季节性区间内始终使用整小时 UTC 偏移；包含半小时或四十五分钟偏移的时区需保持归档关闭。保留边界是本地今日零点前 30 个日历日，并额外保证原始行至少存活 30 × 24 小时。每个过期本地日独立事务：先累加写入 `archive` schema 的摘要，再删除该日所有 27 张原始表的行；失败会回滚整日。
 
 归档只保存 Dashboard 所需的时间、模型、工具、Skill 与数值汇总，不保存 identity、`attrs`、prompt、工具参数/输出或错误原文。`archive.maintenance_state` 仅记录维护状态，不是 watermark；迟到的过期行会在下一轮按原始日期一并归档。
 

@@ -139,6 +139,47 @@ func TestArchiverCancelledBeforeSweepPreservesRawRows(t *testing.T) {
 	assertArchiveCount(t, db.SQL, "metric_token_usage", 1)
 }
 
+func TestNewArchiverRejectsFractionalTimezone(t *testing.T) {
+	db, _ := openArchiveTestStore(t)
+	if _, err := NewArchiver(db, "Asia/Kathmandu", slog.Default()); err == nil {
+		t.Fatal("NewArchiver accepted Asia/Kathmandu")
+	}
+}
+
+func TestArchiverRejectsFractionalTimezoneBeforeWrites(t *testing.T) {
+	db, archiver := openArchiveTestStore(t)
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatalf("load Kolkata: %v", err)
+	}
+	now := time.Date(2026, time.September, 17, 12, 0, 0, 0, time.UTC)
+	old := archiveCutoff(now, loc).Add(-time.Hour)
+	insertClaudeToken(t, db.SQL, old, "unsafe", "input", 10, "m", "s")
+	archiver.loc = loc
+	archiver.timezone = "Asia/Kolkata"
+	if _, err := archiver.RunOnce(context.Background(), now); err == nil {
+		t.Fatal("RunOnce accepted Asia/Kolkata")
+	}
+	assertArchiveCount(t, db.SQL, "metric_token_usage", 1)
+	assertArchiveCount(t, db.SQL, "archive.usage_hourly", 0)
+}
+
+func TestArchiverRejectsHistoricalFractionalDayBeforeWrites(t *testing.T) {
+	db, archiver := openArchiveTestStoreIn(t, "Asia/Shanghai")
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatalf("load Shanghai: %v", err)
+	}
+	now := time.Date(2026, time.September, 17, 12, 0, 0, 0, time.UTC)
+	historical := time.Date(1900, time.January, 2, 12, 0, 0, 0, loc)
+	insertClaudeToken(t, db.SQL, historical, "historical", "input", 10, "m", "s")
+	if _, err := archiver.RunOnce(context.Background(), now); err == nil {
+		t.Fatal("RunOnce accepted a historical fractional local-day boundary")
+	}
+	assertArchiveCount(t, db.SQL, "metric_token_usage", 1)
+	assertArchiveCount(t, db.SQL, "archive.usage_hourly", 0)
+}
+
 func TestArchiverRollsBackWhenFailureFollowsAggregation(t *testing.T) {
 	db, archiver := openArchiveTestStore(t)
 	now := time.Date(2026, time.September, 17, 12, 0, 0, 0, time.UTC)
