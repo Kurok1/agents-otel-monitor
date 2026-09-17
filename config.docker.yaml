@@ -23,6 +23,9 @@ dashboard:
     skills: 10
   timezone: "Asia/Shanghai"
 
+archive:
+  enabled: false
+
 logging:
   level: "info"
   format: "json"

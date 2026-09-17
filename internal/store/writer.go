@@ -20,7 +20,7 @@ type BufferedWriter struct {
 	buffers   map[string]*TableBuffer
 	appenders map[string]*tableAppender
 
-	flushMu sync.Mutex // serializes all per-table flushes
+	writeMu *sync.Mutex // serializes appender flushes and archival writes
 	wg      sync.WaitGroup
 	stop    chan struct{}
 }
@@ -34,6 +34,7 @@ func NewBufferedWriter(db *DB, cfg config.IngestConfig, log *slog.Logger) (*Buff
 		buffers:   make(map[string]*TableBuffer, len(allTables)),
 		appenders: make(map[string]*tableAppender, len(allTables)),
 		stop:      make(chan struct{}),
+		writeMu:   &db.writeMu,
 	}
 
 	for _, t := range allTables {
@@ -130,8 +131,8 @@ func (w *BufferedWriter) flushAll() {
 // flushOne drains buffer[name] and pushes the batch through its appender.
 // Failures preserve the batch via Pushback so the next tick retries.
 func (w *BufferedWriter) flushOne(name string) {
-	w.flushMu.Lock()
-	defer w.flushMu.Unlock()
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
 
 	buf := w.buffers[name]
 	app := w.appenders[name]

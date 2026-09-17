@@ -45,7 +45,9 @@ func BuildPricingModels(ctx context.Context, db *sql.DB, client Client, prices P
 		resp.LastRefresh = st.LastRefreshAt.UTC().Format(time.RFC3339)
 	}
 
-	rows, err := QuerySeenModels(ctx, db, client)
+	rows, err := withDashboardSnapshot(ctx, db, func(q sqlQueryer) ([]seenModelRow, error) {
+		return QuerySeenModels(ctx, q, client)
+	})
 	if err != nil {
 		return resp, err
 	}

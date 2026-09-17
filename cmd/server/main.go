@@ -114,6 +114,13 @@ func runServer(ctx context.Context, args []string, streams commandStreams) error
 	if err := store.RunMigrations(db.SQL, migrations); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
+	var archiver *store.Archiver
+	if cfg.Archive.Enabled {
+		archiver, err = store.NewArchiver(db, cfg.Dashboard.Timezone, slog.Default())
+		if err != nil {
+			return fmt.Errorf("init archiver: %w", err)
+		}
+	}
 
 	writer, err := store.NewBufferedWriter(db, cfg.Ingest, slog.Default())
 	if err != nil {
@@ -148,6 +155,9 @@ func runServer(ctx context.Context, args []string, streams commandStreams) error
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve() }()
+	if archiver != nil {
+		archiver.Start(ctx)
+	}
 
 	slog.Info("server ready",
 		"duckdb_path", cfg.Storage.DuckDBPath,
@@ -168,6 +178,9 @@ func runServer(ctx context.Context, args []string, streams commandStreams) error
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			defer cancel()
 			_ = statsSrv.Shutdown(shutdownCtx)
+			if archiver != nil {
+				archiver.Stop()
+			}
 			_ = writer.Stop()
 			return fmt.Errorf("grpc server: %w", err)
 		}
@@ -177,6 +190,9 @@ func runServer(ctx context.Context, args []string, streams commandStreams) error
 	defer cancel()
 	if err := statsSrv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("stats server shutdown", "err", err)
+	}
+	if archiver != nil {
+		archiver.Stop()
 	}
 	if err := writer.Stop(); err != nil {
 		slog.Error("buffered writer stop", "err", err)

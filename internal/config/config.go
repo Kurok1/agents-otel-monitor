@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/kuroky/claude-code-monitor/internal/archivezone"
 	"gopkg.in/yaml.v3"
 )
 
@@ -16,6 +17,7 @@ type Config struct {
 	Capture   CaptureConfig   `yaml:"capture"`
 	Stats     StatsConfig     `yaml:"stats"`
 	Dashboard DashboardConfig `yaml:"dashboard"`
+	Archive   ArchiveConfig   `yaml:"archive"`
 	Pricing   PricingConfig   `yaml:"pricing"`
 	Logging   LoggingConfig   `yaml:"logging"`
 }
@@ -60,6 +62,12 @@ type DashboardConfig struct {
 	// derives `<family>-<major>.<minor>` (e.g. claude-opus-4-7[1m] → opus-4.7).
 	// Otherwise the raw model name is kept verbatim.
 	ModelGroups []ModelGroupRule `yaml:"model_groups"`
+}
+
+// ArchiveConfig controls compaction of expired raw telemetry into archive
+// summaries. Disabled preserves the existing unbounded raw-data behavior.
+type ArchiveConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type TopNConfig struct {
@@ -219,6 +227,11 @@ func validate(cfg *Config) error {
 	}
 	if _, err := time.LoadLocation(cfg.Dashboard.Timezone); err != nil {
 		return fmt.Errorf("dashboard.timezone %q: %w", cfg.Dashboard.Timezone, err)
+	}
+	if cfg.Archive.Enabled {
+		if _, err := archivezone.Validate(cfg.Dashboard.Timezone); err != nil {
+			return fmt.Errorf("archive.enabled requires a whole-hour dashboard.timezone: %w", err)
+		}
 	}
 	hm := cfg.Dashboard.Heatmap
 	if hm.WTokens < 0 || hm.WCost < 0 || hm.WRequests < 0 {

@@ -57,10 +57,12 @@ func BuildPeriodModels(
 	response.Range = spec.Range
 	response.CostEstimated = opts.PricingEnabled && opts.Client.includesCodex()
 
-	rows, err := queryPeriodModelRows(ctx, db, periodModelQuery{
-		Client: opts.Client,
-		Start:  spec.CurrentStart,
-		End:    spec.CurrentEnd,
+	rows, err := withDashboardSnapshot(ctx, db, func(q sqlQueryer) ([]periodModelRow, error) {
+		return queryPeriodModelRows(ctx, q, periodModelQuery{
+			Client: opts.Client,
+			Start:  spec.CurrentStart,
+			End:    spec.CurrentEnd,
+		})
 	})
 	if err != nil {
 		return response, err
@@ -119,10 +121,24 @@ func BuildPeriodModels(
 
 func queryPeriodModelRows(
 	ctx context.Context,
-	db *sql.DB,
+	db sqlQueryer,
 	params periodModelQuery,
 ) ([]periodModelRow, error) {
 	rows := make([]periodModelRow, 0)
+	if first, last, ok := archiveBounds(params.Start, params.End); ok {
+		for _, source := range archiveClients(params.Client) {
+			const query = `SELECT model, COALESCE(SUM(request_count),0), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0) FROM archive.usage_hourly WHERE client=? AND bucket_start>=? AND bucket_start<? AND model<>'' AND (client='claude' OR token_rows>0) GROUP BY model`
+			queryRows, err := db.QueryContext(ctx, query, source, first, last)
+			if err != nil {
+				return nil, fmt.Errorf("query archive period models (%s): %w", source, err)
+			}
+			archiveRows, err := scanPeriodModelRows(queryRows, "archive "+string(source))
+			if err != nil {
+				return nil, err
+			}
+			rows = append(rows, archiveRows...)
+		}
+	}
 	if params.Client.includesClaude() {
 		const query = `
 			SELECT model,

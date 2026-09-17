@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"sort"
 	"time"
 
@@ -30,67 +31,86 @@ func BuildSnapshot(
 		return resp, err
 	}
 	resp.Range = spec.Range
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return resp, fmt.Errorf("begin snapshot query: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	queryer, err := archiveScopedQueryer(ctx, tx)
+	if err != nil {
+		return resp, err
+	}
 
-	curTokens, err := QueryPeriodTokens(ctx, db, client, spec.CurrentStart, spec.CurrentEnd)
+	curTokens, err := QueryPeriodTokens(ctx, queryer, client, spec.CurrentStart, spec.CurrentEnd)
 	if err != nil {
 		return resp, err
 	}
-	prevTokens, err := QueryPeriodTokensTotal(ctx, db, client, spec.PreviousStart, spec.PreviousEnd)
+	prevTokens, err := QueryPeriodTokensTotal(ctx, queryer, client, spec.PreviousStart, spec.PreviousEnd)
 	if err != nil {
 		return resp, err
 	}
-	tokenBuckets, err := QueryTokensSparkline(ctx, db, client, w, spec.SparklineGrain,
+	tokenBuckets, err := QueryTokensSparkline(ctx, queryer, client, w, spec.SparklineGrain,
 		spec.SparklineStart, spec.PeriodEnd)
 	if err != nil {
 		return resp, err
 	}
 
-	curCost, err := QueryPeriodCost(ctx, db, client, spec.CurrentStart, spec.CurrentEnd)
+	curCost, err := QueryPeriodCost(ctx, queryer, client, spec.CurrentStart, spec.CurrentEnd)
 	if err != nil {
 		return resp, err
 	}
-	prevCost, err := QueryPeriodCost(ctx, db, client, spec.PreviousStart, spec.PreviousEnd)
+	prevCost, err := QueryPeriodCost(ctx, queryer, client, spec.PreviousStart, spec.PreviousEnd)
 	if err != nil {
 		return resp, err
 	}
-	costBuckets, err := QueryCostSparkline(ctx, db, client, w, spec.SparklineGrain,
+	costBuckets, err := QueryCostSparkline(ctx, queryer, client, w, spec.SparklineGrain,
 		spec.SparklineStart, spec.PeriodEnd)
 	if err != nil {
 		return resp, err
 	}
 
-	pc, err := QueryPeriodCache(ctx, db, client, spec.CurrentStart, spec.CurrentEnd)
+	pc, err := QueryPeriodCache(ctx, queryer, client, spec.CurrentStart, spec.CurrentEnd)
 	if err != nil {
 		return resp, err
 	}
 
-	curRequests, err := QueryPeriodRequests(ctx, db, client, spec.CurrentStart, spec.CurrentEnd)
+	curRequests, err := QueryPeriodRequests(ctx, queryer, client, spec.CurrentStart, spec.CurrentEnd)
 	if err != nil {
 		return resp, err
 	}
-	prevRequests, err := QueryPeriodRequests(ctx, db, client, spec.PreviousStart, spec.PreviousEnd)
+	prevRequests, err := QueryPeriodRequests(ctx, queryer, client, spec.PreviousStart, spec.PreviousEnd)
 	if err != nil {
 		return resp, err
 	}
-	requestBuckets, err := QueryRequestsSparkline(ctx, db, client, w, spec.SparklineGrain,
+	requestBuckets, err := QueryRequestsSparkline(ctx, queryer, client, w, spec.SparklineGrain,
 		spec.SparklineStart, spec.PeriodEnd)
 	if err != nil {
 		return resp, err
 	}
 
-	modelTok, err := QueryModelTokens(ctx, db, client)
+	modelTok, err := QueryModelTokens(ctx, queryer, client)
 	if err != nil {
 		return resp, err
 	}
+	modelC, err := QueryModelCost(ctx, queryer, client)
+	if err != nil {
+		return resp, err
+	}
+	modelR, err := QueryModelRequests(ctx, queryer, client)
+	if err != nil {
+		return resp, err
+	}
+	if err := tx.Commit(); err != nil {
+		return resp, fmt.Errorf("commit snapshot query: %w", err)
+	}
+	committed = true
+	modelTok = mergePricingTokenRows(modelTok)
 	attachModelCostBreakdowns(modelTok, prices, pricingEnabled)
-	modelC, err := QueryModelCost(ctx, db, client)
-	if err != nil {
-		return resp, err
-	}
-	modelR, err := QueryModelRequests(ctx, db, client)
-	if err != nil {
-		return resp, err
-	}
 
 	resp.Tokens = TokensBlock{
 		In:        curTokens.In,
@@ -119,12 +139,43 @@ func BuildSnapshot(
 	return resp, nil
 }
 
+// mergePricingTokenRows combines cold and raw token aggregates before price
+// calculation. Client remains part of the identity until display grouping.
+func mergePricingTokenRows(rows []modelTokens) []modelTokens {
+	byKey := make(map[string]modelTokens, len(rows))
+	order := make([]string, 0, len(rows))
+	for _, row := range rows {
+		key := string(row.Client) + "\x00" + row.Model
+		current, ok := byKey[key]
+		if !ok {
+			byKey[key] = row
+			order = append(order, key)
+			continue
+		}
+		current.TokensIn += row.TokensIn
+		current.TokensOut += row.TokensOut
+		current.CacheTokens += row.CacheTokens
+		current.ReasoningTokens += row.ReasoningTokens
+		current.TokenRows += row.TokenRows
+		current.FromArchive = current.FromArchive || row.FromArchive
+		byKey[key] = current
+	}
+	out := make([]modelTokens, 0, len(order))
+	for _, key := range order {
+		out = append(out, byKey[key])
+	}
+	return out
+}
+
 func attachModelCostBreakdowns(rows []modelTokens, prices PriceLookup, enabled bool) {
 	if !enabled || prices == nil {
 		return
 	}
 	for i := range rows {
 		row := &rows[i]
+		if row.FromArchive && row.TokenRows == 0 {
+			continue
+		}
 		price, ok := prices.PriceFor(row.Model)
 		if !ok {
 			continue

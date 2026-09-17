@@ -76,3 +76,40 @@ func TestPricingConfigDefaultsAndValidate(t *testing.T) {
 		t.Fatalf("disabled pricing should validate, got %v", err)
 	}
 }
+
+func TestArchiveDefaultsDisabledAndCanBeEnabled(t *testing.T) {
+	cfg := baseValidConfig()
+	if cfg.Archive.Enabled {
+		t.Fatal("archive should default to disabled")
+	}
+	cfg.Archive.Enabled = true
+	if err := validate(&cfg); err != nil {
+		t.Fatalf("enabled archive should validate: %v", err)
+	}
+}
+
+func TestArchiveTimezoneConstraintAppliesOnlyWhenEnabled(t *testing.T) {
+	for _, timezone := range []string{"Asia/Kolkata", "Asia/Kathmandu", "Australia/Lord_Howe"} {
+		t.Run(timezone, func(t *testing.T) {
+			cfg := baseValidConfig()
+			cfg.Dashboard.Timezone = timezone
+			if err := validate(&cfg); err != nil {
+				t.Fatalf("disabled archive rejected %s: %v", timezone, err)
+			}
+			cfg.Archive.Enabled = true
+			if err := validate(&cfg); err == nil {
+				t.Fatalf("enabled archive accepted fractional timezone %s", timezone)
+			}
+		})
+	}
+	for _, timezone := range []string{"Asia/Shanghai", "UTC", "America/New_York"} {
+		t.Run(timezone, func(t *testing.T) {
+			cfg := baseValidConfig()
+			cfg.Dashboard.Timezone = timezone
+			cfg.Archive.Enabled = true
+			if err := validate(&cfg); err != nil {
+				t.Fatalf("enabled archive rejected whole-hour timezone %s: %v", timezone, err)
+			}
+		})
+	}
+}

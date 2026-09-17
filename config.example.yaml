@@ -44,6 +44,12 @@ dashboard:
   #   - pattern: '(?i)^claude-opus-.*'        # 覆盖内置:全部 opus 合并(不分版本)
   #     group:   'opus'
 
+# 原始遥测满 30 个本地日后压缩到 archive 摘要表，并删除原始行。
+# 仅支持全年 UTC 偏移均为整小时的 dashboard.timezone（如 Asia/Shanghai、UTC）。
+# archive 表不保存 identity、attrs、prompt 或工具参数等原文。
+archive:
+  enabled: false
+
 logging:
   level: "info"                # debug / info / warn / error
   format: "json"               # json / text
