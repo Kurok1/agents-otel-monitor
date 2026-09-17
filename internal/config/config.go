@@ -16,6 +16,7 @@ type Config struct {
 	Capture   CaptureConfig   `yaml:"capture"`
 	Stats     StatsConfig     `yaml:"stats"`
 	Dashboard DashboardConfig `yaml:"dashboard"`
+	Archive   ArchiveConfig   `yaml:"archive"`
 	Pricing   PricingConfig   `yaml:"pricing"`
 	Logging   LoggingConfig   `yaml:"logging"`
 }
@@ -60,6 +61,12 @@ type DashboardConfig struct {
 	// derives `<family>-<major>.<minor>` (e.g. claude-opus-4-7[1m] → opus-4.7).
 	// Otherwise the raw model name is kept verbatim.
 	ModelGroups []ModelGroupRule `yaml:"model_groups"`
+}
+
+// ArchiveConfig controls compaction of expired raw telemetry into archive
+// summaries. Disabled preserves the existing unbounded raw-data behavior.
+type ArchiveConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 type TopNConfig struct {

@@ -21,7 +21,9 @@ func BuildTrends(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow, r
 		return TrendsResponse{}, err
 	}
 
-	rows, err := QueryTrends(ctx, db, client, w, grain, start)
+	rows, err := withDashboardSnapshot(ctx, db, func(q sqlQueryer) ([]trendRow, error) {
+		return QueryTrends(ctx, q, client, w, grain, start)
+	})
 	if err != nil {
 		return TrendsResponse{}, err
 	}

@@ -592,10 +592,11 @@ Codex 表族主要靠 `conversation_id` 组织会话，`call_id` 串联 tool_dec
 
 ### 5.6 数据保留
 
-DuckDB 单文件长期增长后查询性能下降。建议：
-- 热数据保留在主 `.duckdb` 文件
-- 老数据（如 > 90 天）`COPY ... TO 'archive/<table>_<yyyymm>.parquet'`，然后 `DELETE FROM ...`
-- 查询时按需 `read_parquet('archive/*.parquet')` 联合查询
+启用 `archive.enabled` 后，服务在启动后后台补偿，并在 `dashboard.timezone` 的每天 03:00 处理过期的原始遥测。保留边界是本地今日零点前 30 个日历日，并额外保证原始行至少存活 30 × 24 小时。每个过期本地日独立事务：先累加写入 `archive` schema 的摘要，再删除该日所有 27 张原始表的行；失败会回滚整日。
+
+归档只保存 Dashboard 所需的时间、模型、工具、Skill 与数值汇总，不保存 identity、`attrs`、prompt、工具参数/输出或错误原文。`archive.maintenance_state` 仅记录维护状态，不是 watermark；迟到的过期行会在下一轮按原始日期一并归档。
+
+完成至少一个归档日后服务会尽力执行普通 `CHECKPOINT`；checkpoint 失败只记录告警，不会回滚已经提交的归档事务。没有过期原始行的巡检只更新维护状态，不执行 checkpoint。
 
 ---
 
@@ -611,7 +612,7 @@ DuckDB 单文件长期增长后查询性能下降。建议：
 
 固定取最近 360 个本地日（含今日），逐日补零。每天的综合强度 `score ∈ [0,1]` 在 Go 侧计算：各指标按 360 天窗口内最大值归一化（min 固定为 0），再用 `config.yaml` 的 `dashboard.heatmap` 权重加权后除以权重和。Codex-only 且未启用 pricing 时不把费用权重计入分母。前端按分位数把 `score` 分成 5 档着色。
 
-> 注意：`docs §5.6` 的归档策略（>90 天导出 parquet 后 `DELETE`）一旦实装，360 天热点图需要 `UNION read_parquet(...)` 才能覆盖完整窗口；当前归档未实装，故暂不受影响。
+> 注意：启用归档后，Dashboard 查询会联合原始表与 `archive` schema 的摘要，以保持 360 天热点图和其他历史视图连续。
 
 ## 6. 演进策略
 
@@ -685,3 +686,21 @@ TBT 表不保存 Histogram 的 explicit bounds / bucket counts。一个 OTLP His
 - `codex_event_tool_result` 的 `arguments` / `output` 原文在解析层即丢弃（只算字节长度），**不落任何列也不落 `attrs`**——Codex 默认不脱敏且无客户端开关，这是接收端的隐私红线
 - token 统计口径为子集式（`cached ⊂ input`、`reasoning ⊂ output`），与 Claude 并列式不同：Codex 总量 = `input_token_count + output_token_count`，不可再加 cached
 - Codex 不上报成本；`cost_usd` 由 `internal/pricing` 在 ingest 时按 LiteLLM 计价表**估算**后落列（默认关闭，见 §配置 `pricing`）。Claude 仍用自报的权威 `cost_usd`（`metric_cost_usage`），不重算；两族表互不交叉
+
+---
+
+## 8. Archive 摘要表（7 张）
+
+迁移 `007_archive_tables.sql` 创建 `archive` schema；原始 27 张表及其写入协议不变。
+
+| 表 | 主键 | 内容 |
+|---|---|---|
+| `archive.usage_hourly` | `bucket_start, client, model` | 每小时 token、请求、成本、速度与模型最后出现时间 |
+| `archive.tool_hourly` | `bucket_start, client, tool_name` | 具名工具调用次数 |
+| `archive.skill_hourly` | `bucket_start, client, skill_name` | Claude Skill 激活数与 Codex 成功注入的 delta 值 |
+| `archive.sessions` | `client, session_id` | 会话活动范围及 token、请求、工具、Skill、成本汇总 |
+| `archive.session_tools` | `client, session_id, tool_name` | 会话内具名工具调用数 |
+| `archive.session_skills` | `client, session_id, skill_name` | Claude 会话内具名 Skill 激活数 |
+| `archive.maintenance_state` | `id = 1` | 最近成功 sweep 的 cutoff、完成时间及删除行数 |
+
+`usage_hourly` 的 `model` 为空时保存空字符串；所有计数值默认 0。Claude 总 token 来自 `metric_token_usage`，成本来自权威 `metric_cost_usage`，请求/速度来自 `event_api_request`。Codex 总 token 为 input + output，成本为写入时冻结的 `cost_usd`，速度来自有效的 TBT Histogram。会话活动只使用各 harness 已定义的 token、请求、工具、Skill、prompt 与 conversation-start 信号；没有会话 ID 的行不生成虚构会话。

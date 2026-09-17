@@ -293,6 +293,7 @@ pkill -TERM -f 'bin/server -config'                # 手动停
 | `dashboard` | `top_n.tools` | `10` | 工具排名 Top N |
 | `dashboard` | `top_n.skills` | `10` | Skill 排名 Top N |
 | `dashboard` | `timezone` | `Asia/Shanghai` | 业务时区，所有时间窗按此切分 |
+| `archive` | `enabled` | `false` | 启用后将满 30 个本地日的原始遥测归档为摘要，并在每日 03:00 清理原始行 |
 | `logging` | `level` | `info` | `debug` / `info` / `warn` / `error` |
 | `logging` | `format` | `json` | `json` / `text` |
 

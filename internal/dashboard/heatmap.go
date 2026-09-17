@@ -28,18 +28,30 @@ func BuildHeatmap(ctx context.Context, db *sql.DB, w TimeWindow, weights Heatmap
 
 	start, end := w.HeatmapStartUTC, w.TodayEndUTC
 
-	tokBuckets, err := QueryTokensSparkline(ctx, db, client, w, "day", start, end)
+	type buckets struct {
+		tokens   []periodBucket
+		costs    []periodCostBucket
+		requests []periodBucket
+	}
+	data, err := withDashboardSnapshot(ctx, db, func(q sqlQueryer) (buckets, error) {
+		tokens, err := QueryTokensSparkline(ctx, q, client, w, "day", start, end)
+		if err != nil {
+			return buckets{}, err
+		}
+		costs, err := QueryCostSparkline(ctx, q, client, w, "day", start, end)
+		if err != nil {
+			return buckets{}, err
+		}
+		requests, err := QueryRequestsSparkline(ctx, q, client, w, "day", start, end)
+		if err != nil {
+			return buckets{}, err
+		}
+		return buckets{tokens, costs, requests}, nil
+	})
 	if err != nil {
 		return resp, err
 	}
-	costBuckets, err := QueryCostSparkline(ctx, db, client, w, "day", start, end)
-	if err != nil {
-		return resp, err
-	}
-	reqBuckets, err := QueryRequestsSparkline(ctx, db, client, w, "day", start, end)
-	if err != nil {
-		return resp, err
-	}
+	tokBuckets, costBuckets, reqBuckets := data.tokens, data.costs, data.requests
 
 	byTok := make(map[time.Time]int64, len(tokBuckets))
 	for _, b := range tokBuckets {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/marcboeker/go-duckdb/v2"
 
@@ -19,6 +20,8 @@ type DB struct {
 	SQL       *sql.DB
 	Connector *duckdb.Connector
 	Path      string
+
+	writeMu sync.Mutex
 }
 
 func Open(cfg config.StorageConfig) (*DB, error) {

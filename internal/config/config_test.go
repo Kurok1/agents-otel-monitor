@@ -76,3 +76,14 @@ func TestPricingConfigDefaultsAndValidate(t *testing.T) {
 		t.Fatalf("disabled pricing should validate, got %v", err)
 	}
 }
+
+func TestArchiveDefaultsDisabledAndCanBeEnabled(t *testing.T) {
+	cfg := baseValidConfig()
+	if cfg.Archive.Enabled {
+		t.Fatal("archive should default to disabled")
+	}
+	cfg.Archive.Enabled = true
+	if err := validate(&cfg); err != nil {
+		t.Fatalf("enabled archive should validate: %v", err)
+	}
+}

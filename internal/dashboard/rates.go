@@ -67,12 +67,46 @@ func BuildRates(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow, rn
 		return RatesResponse{}, err
 	}
 	resp := RatesResponse{Range: spec.Range, BucketInterval: spec.IntervalLabel}
-
-	// ── 生成速度:按 (桶, 组) 合并分子分母后再除(加权平均可无损合并) ──
-	speedRows, err := QuerySpeedBuckets(ctx, db, client, spec.Start, spec.End)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return resp, fmt.Errorf("begin rates query: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	queryer, err := archiveScopedQueryer(ctx, tx)
 	if err != nil {
 		return resp, err
 	}
+
+	// ── 生成速度:按 (桶, 组) 合并分子分母后再除(加权平均可无损合并) ──
+	speedRows, err := QuerySpeedBuckets(ctx, queryer, client, spec.Start, spec.End)
+	if err != nil {
+		return resp, err
+	}
+	var currentWindow, previousWindow speedWindow
+	if client == ClientClaude || client == ClientCodex {
+		currentWindow, err = QuerySpeedWindow(ctx, queryer, client, spec.Start, spec.End)
+		if err != nil {
+			return resp, err
+		}
+		previousStart := spec.Start.Add(-time.Duration(spec.Count) * spec.Interval)
+		previousWindow, err = QuerySpeedWindow(ctx, queryer, client, previousStart, spec.Start)
+		if err != nil {
+			return resp, err
+		}
+	}
+	throughputRows, err := QueryThroughputBuckets(ctx, queryer, client, spec.Start, spec.End)
+	if err != nil {
+		return resp, err
+	}
+	if err := tx.Commit(); err != nil {
+		return resp, fmt.Errorf("commit rates query: %w", err)
+	}
+	committed = true
 	type cellKey struct {
 		idx   int
 		group string
@@ -151,17 +185,8 @@ func BuildRates(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow, rn
 
 	var current, previous *float64
 	if client == ClientClaude || client == ClientCodex {
-		cur, err := QuerySpeedWindow(ctx, db, client, spec.Start, spec.End)
-		if err != nil {
-			return resp, err
-		}
-		prevStart := spec.Start.Add(-time.Duration(spec.Count) * spec.Interval)
-		prev, err := QuerySpeedWindow(ctx, db, client, prevStart, spec.Start)
-		if err != nil {
-			return resp, err
-		}
-		current = windowTokPerSec(cur, client)
-		previous = windowTokPerSec(prev, client)
+		current = windowTokPerSec(currentWindow, client)
+		previous = windowTokPerSec(previousWindow, client)
 	}
 	resp.Speed = SpeedBlock{
 		Groups:   groups,
@@ -171,12 +196,8 @@ func BuildRates(ctx context.Context, db *sql.DB, c *Classifier, w TimeWindow, rn
 	}
 
 	// ── 吞吐率:小时行落桶累加,末桶按实际流逝分钟归一 ──
-	thrRows, err := QueryThroughputBuckets(ctx, db, client, spec.Start, spec.End)
-	if err != nil {
-		return resp, err
-	}
 	thrCells := make([]throughputBucketRow, spec.Count)
-	for _, r := range thrRows {
+	for _, r := range throughputRows {
 		idx := spec.BucketIndex(r.Hour)
 		if idx < 0 {
 			continue
