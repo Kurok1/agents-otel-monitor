@@ -23,6 +23,7 @@ type ModelPrice struct {
 	InputCostPerToken           *float64
 	OutputCostPerToken          *float64
 	CacheReadInputTokenCost     *float64
+	CacheCreationInputTokenCost *float64
 	OutputCostPerReasoningToken *float64
 }
 
@@ -30,22 +31,25 @@ type ModelPrice struct {
 // Cached ⊂ Input, Reasoning ⊂ Output. Tool is carried but never billed
 // (already contained in input/output; see the spec).
 type TokenCounts struct {
-	Input     int64
-	Output    int64
-	Cached    int64
-	Reasoning int64
-	Tool      int64
+	Input      int64
+	Output     int64
+	Cached     int64
+	CacheWrite int64
+	Reasoning  int64
+	Tool       int64
 }
 
 // CostBreakdown is the estimated USD cost split by user-facing token class.
 // Reasoning output is included in Output because it is a subset of output.
 type CostBreakdown struct {
-	Input              float64
-	Output             float64
-	CacheRead          float64
-	InputAvailable     bool
-	OutputAvailable    bool
-	CacheReadAvailable bool
+	Input               float64
+	Output              float64
+	CacheRead           float64
+	CacheWrite          float64
+	InputAvailable      bool
+	OutputAvailable     bool
+	CacheReadAvailable  bool
+	CacheWriteAvailable bool
 }
 
 // priceTable maps a model name to its rates. Overrides are merged in with
@@ -58,6 +62,7 @@ type liteLLMEntry struct {
 	InputCostPerToken           *float64 `json:"input_cost_per_token"`
 	OutputCostPerToken          *float64 `json:"output_cost_per_token"`
 	CacheReadInputTokenCost     *float64 `json:"cache_read_input_token_cost"`
+	CacheCreationInputTokenCost *float64 `json:"cache_creation_input_token_cost"`
 	OutputCostPerReasoningToken *float64 `json:"output_cost_per_reasoning_token"`
 }
 
@@ -83,6 +88,7 @@ func parseLiteLLM(data []byte) (priceTable, error) {
 			InputCostPerToken:           e.InputCostPerToken,
 			OutputCostPerToken:          e.OutputCostPerToken,
 			CacheReadInputTokenCost:     e.CacheReadInputTokenCost,
+			CacheCreationInputTokenCost: e.CacheCreationInputTokenCost,
 			OutputCostPerReasoningToken: e.OutputCostPerReasoningToken,
 		}
 	}
@@ -137,8 +143,12 @@ func (p ModelPrice) CostBreakdown(c TokenCounts) (CostBreakdown, bool) {
 	var breakdown CostBreakdown
 	if p.InputCostPerToken != nil {
 		inputRate := *p.InputCostPerToken
-		breakdown.Input = float64(nonNeg(c.Input-c.Cached)) * inputRate
+		breakdown.Input = float64(nonNeg(c.Input-c.Cached-c.CacheWrite)) * inputRate
 		breakdown.InputAvailable = true
+		if p.CacheCreationInputTokenCost == nil {
+			breakdown.CacheWrite = float64(c.CacheWrite) * inputRate
+			breakdown.CacheWriteAvailable = true
+		}
 		if p.CacheReadInputTokenCost == nil {
 			breakdown.CacheRead = float64(c.Cached) * inputRate
 			breakdown.CacheReadAvailable = true
@@ -147,6 +157,10 @@ func (p ModelPrice) CostBreakdown(c TokenCounts) (CostBreakdown, bool) {
 	if p.CacheReadInputTokenCost != nil {
 		breakdown.CacheRead = float64(c.Cached) * (*p.CacheReadInputTokenCost)
 		breakdown.CacheReadAvailable = true
+	}
+	if p.CacheCreationInputTokenCost != nil {
+		breakdown.CacheWrite = float64(c.CacheWrite) * *p.CacheCreationInputTokenCost
+		breakdown.CacheWriteAvailable = true
 	}
 	if p.OutputCostPerToken != nil {
 		outputRate := *p.OutputCostPerToken
@@ -160,7 +174,7 @@ func (p ModelPrice) CostBreakdown(c TokenCounts) (CostBreakdown, bool) {
 	}
 	complete := breakdown.InputAvailable &&
 		breakdown.OutputAvailable &&
-		breakdown.CacheReadAvailable
+		breakdown.CacheReadAvailable && breakdown.CacheWriteAvailable
 	return breakdown, complete
 }
 
@@ -171,7 +185,7 @@ func (p ModelPrice) cost(c TokenCounts) (float64, bool) {
 	if !ok {
 		return 0, false
 	}
-	return breakdown.Input + breakdown.Output + breakdown.CacheRead, true
+	return breakdown.Input + breakdown.Output + breakdown.CacheRead + breakdown.CacheWrite, true
 }
 
 // merge overlays `over` onto a copy of `base`; keys in `over` win, base-only

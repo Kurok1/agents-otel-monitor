@@ -105,6 +105,10 @@ func BuildSnapshot(
 	if err != nil {
 		return resp, err
 	}
+	costMeta, err := queryCostMetadata(ctx, queryer, client, codexCostFilter{Start: spec.CurrentStart, End: spec.CurrentEnd})
+	if err != nil {
+		return resp, err
+	}
 	if err := tx.Commit(); err != nil {
 		return resp, fmt.Errorf("commit snapshot query: %w", err)
 	}
@@ -120,10 +124,11 @@ func BuildSnapshot(
 		Sparkline: fillTokensSparkline(tokenBuckets, spec, w.Loc),
 	}
 	resp.Cost = CostBlock{
-		Total:     curCost,
-		PrevTotal: prevCost,
-		Sparkline: fillCostSparkline(costBuckets, spec, w.Loc),
-		Estimated: pricingEnabled && client.includesCodex(),
+		CostMetadata: costMeta,
+		Total:        curCost,
+		PrevTotal:    prevCost,
+		Sparkline:    fillCostSparkline(costBuckets, spec, w.Loc),
+		Estimated:    client.includesCodex() && costMeta.Source != "authoritative" && costMeta.Available,
 	}
 	resp.Cache = CacheBlock{
 		HitRate:        hitRateFrom(pc),
@@ -155,6 +160,7 @@ func mergePricingTokenRows(rows []modelTokens) []modelTokens {
 		current.TokensIn += row.TokensIn
 		current.TokensOut += row.TokensOut
 		current.CacheTokens += row.CacheTokens
+		current.CacheWriteTokens += row.CacheWriteTokens
 		current.ReasoningTokens += row.ReasoningTokens
 		current.TokenRows += row.TokenRows
 		current.FromArchive = current.FromArchive || row.FromArchive
@@ -181,10 +187,11 @@ func attachModelCostBreakdowns(rows []modelTokens, prices PriceLookup, enabled b
 			continue
 		}
 		breakdown, _ := price.CostBreakdown(pricing.TokenCounts{
-			Input:     row.TokensIn + row.CacheTokens,
-			Output:    row.TokensOut,
-			Cached:    row.CacheTokens,
-			Reasoning: row.ReasoningTokens,
+			Input:      row.TokensIn + row.CacheTokens + row.CacheWriteTokens,
+			CacheWrite: row.CacheWriteTokens,
+			Output:     row.TokensOut,
+			Cached:     row.CacheTokens,
+			Reasoning:  row.ReasoningTokens,
 		})
 		if breakdown.InputAvailable {
 			row.InputCost = breakdown.Input
@@ -193,6 +200,10 @@ func attachModelCostBreakdowns(rows []modelTokens, prices PriceLookup, enabled b
 		if breakdown.OutputAvailable {
 			row.OutputCost = breakdown.Output
 			row.OutputCostAvailable = true
+		}
+		if breakdown.CacheWriteAvailable {
+			row.CacheWriteCost = breakdown.CacheWrite
+			row.CacheWriteCostAvailable = true
 		}
 		if breakdown.CacheReadAvailable {
 			row.CacheReadCost = breakdown.CacheRead
@@ -261,18 +272,21 @@ func hitRateFrom(pc periodCache) *float64 {
 // descending (busiest first). Ties break alphabetically for stable output.
 func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs []modelRequests) []ModelBlock {
 	type acc struct {
-		tokensIn, tokensOut, cacheTokens int64
-		cost                             float64
-		requests                         int64
-		inputCost                        float64
-		outputCost                       float64
-		cacheReadCost                    float64
-		hasInputCost                     bool
-		hasOutputCost                    bool
-		hasCacheReadCost                 bool
-		missingInputCost                 bool
-		missingOutputCost                bool
-		missingCacheReadCost             bool
+		cacheWriteTokens                                        int64
+		cacheWriteCost                                          float64
+		hasCacheWriteCost, missingCacheWriteCost, costAvailable bool
+		tokensIn, tokensOut, cacheTokens                        int64
+		cost                                                    float64
+		requests                                                int64
+		inputCost                                               float64
+		outputCost                                              float64
+		cacheReadCost                                           float64
+		hasInputCost                                            bool
+		hasOutputCost                                           bool
+		hasCacheReadCost                                        bool
+		missingInputCost                                        bool
+		missingOutputCost                                       bool
+		missingCacheReadCost                                    bool
 	}
 	by := map[string]*acc{}
 	get := func(g string) *acc {
@@ -292,6 +306,13 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 		a.tokensIn += r.TokensIn
 		a.tokensOut += r.TokensOut
 		a.cacheTokens += r.CacheTokens
+		a.cacheWriteTokens += r.CacheWriteTokens
+		if r.CacheWriteCostAvailable {
+			a.cacheWriteCost += r.CacheWriteCost
+			a.hasCacheWriteCost = true
+		} else if r.CacheWriteTokens > 0 {
+			a.missingCacheWriteCost = true
+		}
 		if r.InputCostAvailable {
 			a.inputCost += r.InputCost
 			a.hasInputCost = true
@@ -317,6 +338,7 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 			continue
 		}
 		get(g).cost += r.Cost
+		get(g).costAvailable = true
 	}
 	for _, r := range reqs {
 		g := c.Classify(r.Model)
@@ -328,13 +350,13 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 
 	var total int64
 	for _, a := range by {
-		total += a.tokensIn + a.tokensOut + a.cacheTokens
+		total += a.tokensIn + a.tokensOut + a.cacheTokens + a.cacheWriteTokens
 	}
 
 	out := make([]ModelBlock, 0, len(by))
 	for g, a := range by {
-		sum := a.tokensIn + a.tokensOut + a.cacheTokens
-		if sum == 0 && a.cost == 0 && a.requests == 0 {
+		sum := a.tokensIn + a.tokensOut + a.cacheTokens + a.cacheWriteTokens
+		if sum == 0 && a.cost == 0 && a.requests == 0 && !a.costAvailable {
 			continue
 		}
 		share := 0.0
@@ -342,6 +364,7 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 			share = float64(sum) / float64(total)
 		}
 		block := ModelBlock{
+			CacheWriteTokens: a.cacheWriteTokens, CostAvailable: a.costAvailable,
 			Group:       g,
 			Requests:    a.requests,
 			TokensIn:    a.tokensIn,
@@ -349,6 +372,9 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 			CacheTokens: a.cacheTokens,
 			Cost:        a.cost,
 			Share:       share,
+		}
+		if a.hasCacheWriteCost && !a.missingCacheWriteCost {
+			block.CacheWriteCost = float64Ptr(a.cacheWriteCost)
 		}
 		if a.hasInputCost && !a.missingInputCost {
 			block.InputCost = float64Ptr(a.inputCost)
@@ -365,8 +391,8 @@ func mergeModelGroups(c *Classifier, tok []modelTokens, costs []modelCost, reqs 
 		out = append(out, block)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		si := out[i].TokensIn + out[i].TokensOut + out[i].CacheTokens
-		sj := out[j].TokensIn + out[j].TokensOut + out[j].CacheTokens
+		si := out[i].TokensIn + out[i].TokensOut + out[i].CacheTokens + out[i].CacheWriteTokens
+		sj := out[j].TokensIn + out[j].TokensOut + out[j].CacheTokens + out[j].CacheWriteTokens
 		if si != sj {
 			return si > sj
 		}

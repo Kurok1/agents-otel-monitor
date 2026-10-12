@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from 'react';
 import { Sessions } from '../api/sessions';
+import { costSourceLabel } from '../api/codex-telemetry';
 import type { SessionSummary } from '../api/sessions';
 import { formatTokens, formatCurrency } from '../lib/format';
 
@@ -28,8 +29,10 @@ export function SessionsView({ client, onOpen }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    setRows(null);
-    Sessions.list(50, client)
+    Promise.resolve().then(() => {
+      if (!cancelled) setRows(null);
+      return Sessions.list(50, client);
+    })
       .then(r => {
         if (!cancelled) setRows(r.sessions);
       })
@@ -55,7 +58,7 @@ export function SessionsView({ client, onOpen }: Props) {
         {!rows && !err && <div className="card-sub">加载中…</div>}
         {rows && rows.length === 0 && <div className="card-sub">暂无会话数据</div>}
         {rows && rows.length > 0 && (
-          <table className="model-table session-table">
+          <div className="model-table-scroll"><table className="model-table session-table">
             <thead>
               <tr>
                 <th>会话 ID</th>
@@ -86,13 +89,13 @@ export function SessionsView({ client, onOpen }: Props) {
                   <td className="num">{s.skill_activations.toLocaleString()}</td>
                   <td className="num">
                     {s.cost != null ? formatCurrency(s.cost) : '—'}
-                    {s.cost_estimated && s.cost != null && <span className="est-tag"> 估</span>}
+                    {s.cost_estimated && s.cost != null && <span className="est-tag" title={costSourceLabel(s)}> 估 · {costSourceLabel(s).split(' · ')[0]}</span>}
                   </td>
                   <td className="num">{fmtTime(s.last_active)}</td>
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         )}
       </section>
     </main>

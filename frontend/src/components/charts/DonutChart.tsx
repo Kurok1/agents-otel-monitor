@@ -18,7 +18,11 @@ export function DonutChart({ data, size = 168, centerLabel, centerValue }: Props
   const radius = r - stroke / 2 - 2;
   const C = 2 * Math.PI * radius;
 
-  let acc = 0;
+  const arcs = data.reduce<Array<Datum & { len: number; offset: number }>>((segments, d) => {
+    const last = segments.at(-1);
+    segments.push({ ...d, len: (d.value / total) * C, offset: last ? last.offset + last.len : 0 });
+    return segments;
+  }, []);
   return (
     <div className="donut-wrap" style={{ width: size, height: size }}>
       <svg viewBox={`0 0 ${size} ${size}`}>
@@ -30,10 +34,8 @@ export function DonutChart({ data, size = 168, centerLabel, centerValue }: Props
           stroke="var(--bg-alt)"
           strokeWidth={stroke}
         />
-        {data.map((d, i) => {
-          const len = (d.value / total) * C;
-          const offset = acc;
-          acc += len;
+        {arcs.map((d, i) => {
+          const { len, offset } = d;
           return (
             <circle
               key={i}

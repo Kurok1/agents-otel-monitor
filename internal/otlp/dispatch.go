@@ -37,15 +37,16 @@ func NewDispatcher(log *slog.Logger, sink Sink, engine *pricing.Engine) *Dispatc
 // enrichCodexCost fills r.CostUsd from the pricing engine. No-op when engine is
 // nil (pricing not wired) — CostFor itself no-ops when pricing is disabled.
 func enrichCodexCost(r *CodexEventTokenUsageRow, engine *pricing.Engine) {
-	if engine == nil {
+	if engine == nil || !r.ValidUsage() {
 		return
 	}
 	r.CostUsd = engine.CostFor(r.Model.String, pricing.TokenCounts{
-		Input:     r.InputTokenCount.Int64,
-		Output:    r.OutputTokenCount.Int64,
-		Cached:    r.CachedTokenCount.Int64,
-		Reasoning: r.ReasoningTokenCount.Int64,
-		Tool:      r.ToolTokenCount.Int64,
+		Input:      r.InputTokenCount.Int64,
+		Output:     r.OutputTokenCount.Int64,
+		Cached:     r.CachedTokenCount.Int64,
+		CacheWrite: r.CacheWriteTokenCount.Int64,
+		Reasoning:  r.ReasoningTokenCount.Int64,
+		Tool:       r.ToolTokenCount.Int64,
 	})
 }
 
@@ -56,8 +57,9 @@ var (
 )
 
 const (
-	codexSkillInjectedMetricName = "codex.skill.injected"
-	codexServiceTBTMetricName    = "codex.responses_api_engine_service_tbt.duration_ms"
+	codexSkillInjectedMetricName  = "codex.skill.injected"
+	codexServiceTBTMetricName     = "codex.responses_api_engine_service_tbt.duration_ms"
+	codexTurnTokenUsageMetricName = "codex.turn.token_usage"
 )
 
 func (d *Dispatcher) DispatchMetrics(req *metricspb.ExportMetricsServiceRequest) DispatchSummary {
@@ -79,7 +81,7 @@ func (d *Dispatcher) DispatchMetrics(req *metricspb.ExportMetricsServiceRequest)
 						continue
 					}
 				}
-				if m.Name == codexServiceTBTMetricName {
+				if m.Name == codexServiceTBTMetricName || m.Name == codexTurnTokenUsageMetricName {
 					histogram, ok := m.Data.(*mpb.Metric_Histogram)
 					if !ok || histogram.Histogram == nil ||
 						histogram.Histogram.AggregationTemporality != mpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA {
@@ -88,10 +90,7 @@ func (d *Dispatcher) DispatchMetrics(req *metricspb.ExportMetricsServiceRequest)
 						continue
 					}
 					for _, dp := range histogram.Histogram.DataPoints {
-						r, err := parseCodexResponseTBT(dp, resourceAttrs)
-						if err == nil {
-							err = d.sink.AppendMetric(r)
-						}
+						err := d.dispatchCodexHistogram(m.Name, dp, resourceAttrs)
 						if err != nil {
 							d.log.Warn("metric parse failed", "metric", m.Name, "err", err)
 							summary.Errors++
@@ -314,6 +313,18 @@ func (d *Dispatcher) dispatchEvent(name string, rec *lpb.LogRecord, resourceAttr
 // response.completed, everything else is counted as skipped or unknown.
 func (d *Dispatcher) dispatchCodexEvent(name string, rec *lpb.LogRecord, resourceAttrs []*commonpb.KeyValue) error {
 	switch name {
+	case "codex.skill_invocation":
+		r, err := parseCodexSkillInvocation(rec, resourceAttrs)
+		if err != nil {
+			return err
+		}
+		return d.sink.AppendEvent(r)
+	case "codex.turn_cost":
+		r, err := parseCodexTurnCost(rec, resourceAttrs)
+		if err != nil {
+			return err
+		}
+		return d.sink.AppendEvent(r)
 	case "codex.conversation_starts":
 		r, err := parseCodexConversationStarts(rec, resourceAttrs)
 		if err != nil {

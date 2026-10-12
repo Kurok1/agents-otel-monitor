@@ -13,6 +13,7 @@
 // everything else → group name verbatim, tier "第三方模型").
 
 import { getJSON } from './http';
+import type { CostMetadata, CodexTelemetry } from './codex-telemetry';
 
 export type Range = 'day' | 'week' | 'month';
 export type Since = '7d' | '30d' | 'all';
@@ -30,6 +31,9 @@ export interface ModelBreakdown extends ModelMeta {
   tokens_in: number;
   tokens_out: number;
   cache_tokens: number;
+  cache_write_tokens: number;
+  cache_write_cost: number | null;
+  cost_available?: boolean;
   cost: number;
   input_cost: number | null;
   output_cost: number | null;
@@ -75,6 +79,7 @@ export interface RealtimeSpeed {
 }
 
 export interface DashboardData {
+  codexTelemetry: CodexTelemetry | null;
   updatedAt: string;
   range: Range;
   tokens: {
@@ -84,7 +89,7 @@ export interface DashboardData {
     prev_total: number;
     sparkline: number[];
   };
-  cost: {
+  cost: CostMetadata & {
     total: number;
     prev_total: number;
     sparkline: number[];
@@ -239,7 +244,7 @@ interface SnapshotWire {
     prev_total: number;
     sparkline: number[];
   };
-  cost: {
+  cost: CostMetadata & {
     total: number;
     prev_total: number;
     sparkline: number[];
@@ -261,6 +266,9 @@ interface SnapshotWire {
     tokens_in: number;
     tokens_out: number;
     cache_tokens: number;
+  cache_write_tokens: number;
+  cache_write_cost: number | null;
+  cost_available?: boolean;
     cost: number;
     input_cost: number | null;
     output_cost: number | null;
@@ -329,15 +337,16 @@ interface RealtimeSpeedWire {
 
 export const Dashboard = {
   async fetch(range: Range = 'day', since: Since = '7d', client: Client = 'all'): Promise<DashboardData> {
-    const [snap, trends, rankings, heatmap, rates, realtimeSpeed] = await Promise.all([
+    const [snap, trends, rankings, heatmap, rates, realtimeSpeed, telemetry] = await Promise.all([
       getJSON<SnapshotWire>(`/api/usage/snapshot?range=${range}&client=${client}`),
       getJSON<TrendsWire>(`/api/usage/trends?range=${range}&client=${client}`),
       getJSON<RankingsWire>(`/api/usage/rankings?since=${since}&client=${client}`),
       getJSON<HeatmapWire>(`/api/usage/heatmap?client=${client}`),
       getJSON<RatesWire>(`/api/usage/rates?range=${range}&client=${client}`),
       getJSON<RealtimeSpeedWire>(`/api/usage/rates/realtime?client=${client}`),
+      client === 'claude' ? Promise.resolve(null) : getJSON<CodexTelemetry>(`/api/usage/codex/telemetry?range=${range}`).catch(() => null),
     ]);
-    return adapt(snap, trends, rankings, heatmap, rates, realtimeSpeed);
+    return { ...adapt(snap, trends, rankings, heatmap, rates, realtimeSpeed), codexTelemetry: telemetry };
   },
 
   async fetchRealtimeSpeed(client: Client = 'all'): Promise<RealtimeSpeed> {
@@ -361,6 +370,7 @@ function adapt(
 
   return {
     updatedAt: snap.updated_at,
+    codexTelemetry: null,
     range: snap.range,
     tokens: snap.tokens,
     cost: snap.cost,
@@ -372,6 +382,9 @@ function adapt(
       tokens_in: m.tokens_in,
       tokens_out: m.tokens_out,
       cache_tokens: m.cache_tokens,
+      cache_write_tokens: m.cache_write_tokens ?? 0,
+      cache_write_cost: m.cache_write_cost ?? null,
+      cost_available: m.cost_available,
       cost: m.cost,
       input_cost: m.input_cost,
       output_cost: m.output_cost,

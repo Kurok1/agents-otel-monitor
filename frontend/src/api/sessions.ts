@@ -7,10 +7,11 @@
 // /api/sessions/{id} on the same origin (Vite dev proxy → Go server).
 
 import { getJSON } from './http';
+import type { CostMetadata } from './codex-telemetry';
 
 export type SessionClient = 'claude' | 'codex';
 
-export interface SessionSummary {
+export interface SessionSummary extends CostMetadata {
   session_id: string;
   client: SessionClient;
   first_active: string;
@@ -35,11 +36,13 @@ export interface ToolSlice {
   count: number;
 }
 export interface SkillSlice {
+  explicit: number;
+  implicit: number;
   name: string;
   activations: number;
 }
 
-export interface SessionDetail {
+export interface SessionDetail extends CostMetadata {
   session_id: string;
   client: SessionClient;
   first_active: string;
@@ -57,6 +60,7 @@ export interface SessionDetail {
     input: number;
     output: number;
     cached: number;
+    cache_write: number;
     reasoning: number;
   };
 }

@@ -45,7 +45,7 @@ func BuildSessionDetail(ctx context.Context, db *sql.DB, sessionID string, clien
 		return formatClaudeSessionDetail(resultValue.claude, toolsTopN, skillsTopN), true, nil
 	}
 	if resultValue.codex != nil {
-		return formatCodexSessionDetail(resultValue.codex, toolsTopN), true, nil
+		return formatCodexSessionDetail(resultValue.codex, toolsTopN, skillsTopN), true, nil
 	}
 	return SessionDetailResponse{}, false, nil
 }
@@ -63,9 +63,9 @@ type codexSessionDetail struct {
 	first, last      time.Time
 	tokens, requests int64
 	tools            []ToolRank
+	skills           []SkillRank
 	detail           SessionTokenDetail
-	cost             float64
-	pricingEnabled   bool
+	cost             codexCostResult
 }
 
 func readClaudeSessionDetail(ctx context.Context, db sqlQueryer, sessionID string) (*claudeSessionDetail, bool, error) {
@@ -118,14 +118,16 @@ func readCodexSessionDetail(ctx context.Context, db sqlQueryer, sessionID string
 	if err != nil {
 		return nil, false, err
 	}
-	data := &codexSessionDetail{sessionID, first.Time.UTC(), last.Time.UTC(), tokens, requests, tools, detail, 0, pricingEnabled}
-	if pricingEnabled {
-		cost, err := QueryCodexSessionCost(ctx, db, sessionID)
-		if err != nil {
-			return nil, false, err
-		}
-		data.cost = cost
+	skills, err := queryCodexSessionSkills(ctx, db, sessionID)
+	if err != nil {
+		return nil, false, err
 	}
+	cost, err := queryCodexCost(ctx, db, codexCostFilter{ConversationID: sessionID})
+	if err != nil {
+		return nil, false, err
+	}
+	data := &codexSessionDetail{sessionID: sessionID, first: first.Time.UTC(), last: last.Time.UTC(), tokens: tokens, requests: requests, tools: tools, skills: skills, detail: detail, cost: cost}
+
 	return data, true, nil
 }
 func formatClaudeSessionDetail(data *claudeSessionDetail, toolsTopN, skillsTopN int) SessionDetailResponse {
@@ -146,17 +148,23 @@ func formatClaudeSessionDetail(data *claudeSessionDetail, toolsTopN, skillsTopN 
 	}
 	return resp
 }
-func formatCodexSessionDetail(data *codexSessionDetail, toolsTopN int) SessionDetailResponse {
+func formatCodexSessionDetail(data *codexSessionDetail, toolsTopN, skillsTopN int) SessionDetailResponse {
 	var toolCalls int64
 	for _, tool := range data.tools {
 		toolCalls += tool.Count
 	}
-	resp := SessionDetailResponse{SessionID: data.sessionID, Client: "codex", FirstActive: data.first.Format(time.RFC3339), LastActive: data.last.Format(time.RFC3339), Tokens: data.tokens, Requests: data.requests, ToolCalls: toolCalls, Tools: bucketToolsTopN(data.tools, toolsTopN), Skills: []SkillRank{}, TokenDetail: &data.detail}
+	resp := SessionDetailResponse{SessionID: data.sessionID, Client: "codex", FirstActive: data.first.Format(time.RFC3339), LastActive: data.last.Format(time.RFC3339), Tokens: data.tokens, Requests: data.requests, ToolCalls: toolCalls, Tools: bucketToolsTopN(data.tools, toolsTopN), Skills: bucketSkillsTopN(data.skills, skillsTopN), SkillSource: "codex.skill_invocation", CostMetadata: data.cost.CostMetadata, TokenDetail: &data.detail}
 	if resp.Tools == nil {
 		resp.Tools = []ToolRank{}
 	}
-	if data.pricingEnabled {
-		cost := data.cost
+	for _, skill := range data.skills {
+		resp.SkillActivations += skill.Activations
+	}
+	if resp.Skills == nil {
+		resp.Skills = []SkillRank{}
+	}
+	if data.cost.Available {
+		cost := data.cost.Total
 		resp.Cost = &cost
 		resp.CostEstimated = true
 	}
@@ -229,55 +237,13 @@ func buildClaudeSessionDetail(ctx context.Context, db sqlQueryer, sessionID stri
 
 // buildCodexSessionDetail assembles the codex-family detail: tokens follow
 // the merged projection (total = input + output), requests count completed
-// responses, and there is no skill concept.
+// responses, and Skill counts come from deduplicated invocation events.
 func buildCodexSessionDetail(ctx context.Context, db sqlQueryer, conversationID string, toolsTopN int, pricingEnabled bool) (SessionDetailResponse, bool, error) {
-	first, last, err := QueryCodexSessionTimespan(ctx, db, conversationID)
-	if err != nil {
-		return SessionDetailResponse{}, false, err
+	data, found, err := readCodexSessionDetail(ctx, db, conversationID, pricingEnabled)
+	if err != nil || !found {
+		return SessionDetailResponse{}, found, err
 	}
-	if !last.Valid {
-		return SessionDetailResponse{}, false, nil
-	}
-	tokens, detail, err := QueryCodexSessionTokens(ctx, db, conversationID)
-	if err != nil {
-		return SessionDetailResponse{}, false, err
-	}
-	requests, err := QueryCodexSessionRequests(ctx, db, conversationID)
-	if err != nil {
-		return SessionDetailResponse{}, false, err
-	}
-	tools, err := QueryCodexSessionToolBreakdown(ctx, db, conversationID)
-	if err != nil {
-		return SessionDetailResponse{}, false, err
-	}
-	var toolCalls int64
-	for _, t := range tools {
-		toolCalls += t.Count
-	}
-	resp := SessionDetailResponse{
-		SessionID:   conversationID,
-		Client:      "codex",
-		FirstActive: first.Time.UTC().Format(time.RFC3339),
-		LastActive:  last.Time.UTC().Format(time.RFC3339),
-		Tokens:      tokens,
-		Requests:    requests,
-		ToolCalls:   toolCalls,
-		Tools:       bucketToolsTopN(tools, toolsTopN),
-		Skills:      []SkillRank{}, // codex has no skill concept
-		TokenDetail: &detail,
-	}
-	if resp.Tools == nil {
-		resp.Tools = []ToolRank{}
-	}
-	if pricingEnabled {
-		cost, err := QueryCodexSessionCost(ctx, db, conversationID)
-		if err != nil {
-			return SessionDetailResponse{}, false, err
-		}
-		resp.Cost = &cost
-		resp.CostEstimated = true
-	}
-	return resp, true, nil
+	return formatCodexSessionDetail(data, toolsTopN, 0), true, nil
 }
 
 // BuildSessionList assembles GET /api/sessions. The caller is responsible for
@@ -300,7 +266,8 @@ func BuildSessionList(ctx context.Context, db *sql.DB, client Client, limit int,
 			SkillActivations: r.Skills,
 		}
 		if r.Client == "codex" {
-			if pricingEnabled {
+			s.CostMetadata = r.CostMetadata
+			if r.Available {
 				c := r.Cost
 				s.Cost = &c
 				s.CostEstimated = true
@@ -343,12 +310,14 @@ func bucketSkillsTopN(rows []SkillRank, n int) []SkillRank {
 	}
 	out := make([]SkillRank, 0, n+1)
 	out = append(out, rows[:n]...)
-	var rest int64
+	var rest, explicit, implicit int64
 	for _, r := range rows[n:] {
+		explicit += r.Explicit
+		implicit += r.Implicit
 		rest += r.Activations
 	}
 	if rest > 0 {
-		out = append(out, SkillRank{Name: otherBucketLabel, Activations: rest})
+		out = append(out, SkillRank{Name: otherBucketLabel, Activations: rest, Explicit: explicit, Implicit: implicit})
 	}
 	return out
 }

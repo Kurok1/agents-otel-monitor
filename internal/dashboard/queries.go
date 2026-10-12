@@ -115,7 +115,7 @@ func querySessionListOptimized(ctx context.Context, db sqlQueryer, client Client
 		args = append(args, row.Client, row.SessionID)
 	}
 	wanted := strings.Join(values, ",")
-	rawSQL := `WITH wanted(client, session_id) AS (VALUES ` + wanted + `), activity(session_id,ts,client) AS (` + arms + `), sess AS (SELECT w.session_id,w.client,MIN(a.ts) first_ts,MAX(a.ts) last_ts FROM wanted w LEFT JOIN activity a ON a.client=w.client AND a.session_id=w.session_id GROUP BY w.session_id,w.client) SELECT s.session_id,s.client,s.first_ts,s.last_ts,CASE WHEN s.client='claude' THEN COALESCE((SELECT SUM(value) FROM metric_token_usage t WHERE t.session_id=s.session_id),0) ELSE COALESCE((SELECT SUM(COALESCE(input_token_count,0)+COALESCE(output_token_count,0)) FROM codex_event_token_usage t WHERE t.conversation_id=s.session_id),0) END,CASE WHEN s.client='claude' THEN (SELECT COUNT(*) FROM event_api_request t WHERE t.session_id=s.session_id) ELSE (SELECT COUNT(*) FROM codex_event_token_usage t WHERE t.conversation_id=s.session_id) END,CASE WHEN s.client='claude' THEN (SELECT COUNT(*) FROM event_tool_result t WHERE t.session_id=s.session_id) ELSE (SELECT COUNT(*) FROM codex_event_tool_result t WHERE t.conversation_id=s.session_id) END,CASE WHEN s.client='claude' THEN (SELECT COUNT(*) FROM event_skill_activated t WHERE t.session_id=s.session_id) ELSE 0 END,CASE WHEN s.client='claude' THEN COALESCE((SELECT SUM(value) FROM metric_cost_usage t WHERE t.session_id=s.session_id),0) ELSE COALESCE((SELECT SUM(cost_usd) FROM codex_event_token_usage t WHERE t.conversation_id=s.session_id),0) END FROM sess s`
+	rawSQL := `WITH wanted(client, session_id) AS (VALUES ` + wanted + `), activity(session_id,ts,client) AS (` + arms + `), sess AS (SELECT w.session_id,w.client,MIN(a.ts) first_ts,MAX(a.ts) last_ts FROM wanted w LEFT JOIN activity a ON a.client=w.client AND a.session_id=w.session_id GROUP BY w.session_id,w.client) SELECT s.session_id,s.client,s.first_ts,s.last_ts,CASE WHEN s.client='claude' THEN COALESCE((SELECT SUM(value) FROM metric_token_usage t WHERE t.session_id=s.session_id),0) ELSE COALESCE((SELECT SUM(COALESCE(input_token_count,0)+COALESCE(output_token_count,0)) FROM codex_valid_token_usage t WHERE t.conversation_id=s.session_id),0) END,CASE WHEN s.client='claude' THEN (SELECT COUNT(*) FROM event_api_request t WHERE t.session_id=s.session_id) ELSE (SELECT COUNT(*) FROM codex_valid_token_usage t WHERE t.conversation_id=s.session_id) END,CASE WHEN s.client='claude' THEN (SELECT COUNT(*) FROM event_tool_result t WHERE t.session_id=s.session_id) ELSE (SELECT COUNT(*) FROM codex_event_tool_result t WHERE t.conversation_id=s.session_id) END,CASE WHEN s.client='claude' THEN (SELECT COUNT(*) FROM event_skill_activated t WHERE t.session_id=s.session_id) ELSE 0 END,CASE WHEN s.client='claude' THEN COALESCE((SELECT SUM(value) FROM metric_cost_usage t WHERE t.session_id=s.session_id),0) ELSE COALESCE((SELECT SUM(cost_usd) FROM codex_valid_token_usage t WHERE t.conversation_id=s.session_id),0) END FROM sess s`
 	byKey := make(map[string]sessionListRow, len(selected))
 	rows, err = db.QueryContext(ctx, rawSQL, args...)
 	if err != nil {
@@ -201,6 +201,9 @@ func querySessionListOptimized(ctx context.Context, db sqlQueryer, client Client
 		}
 		return out[i].SessionID < out[j].SessionID
 	})
+	if err := attachCodexSessionRows(ctx, db, out); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -246,7 +249,7 @@ func addArchivePeriodTokens(ctx context.Context, db sqlQueryer, client Client, s
 	}
 	for _, source := range archiveClients(client) {
 		var in, out, total int64
-		const q = `SELECT COALESCE(SUM(CASE WHEN client='codex' THEN input_tokens-cache_read_tokens ELSE input_tokens END), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(tokens_total), 0) FROM archive.usage_hourly WHERE client=? AND bucket_start>=? AND bucket_start<?`
+		const q = `SELECT COALESCE(SUM(CASE WHEN client='codex' THEN input_tokens-cache_read_tokens-cache_creation_tokens ELSE input_tokens END), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(tokens_total), 0) FROM archive.usage_hourly WHERE client=? AND bucket_start>=? AND bucket_start<?`
 		if err := db.QueryRowContext(ctx, q, source, first, last).Scan(&in, &out, &total); err != nil {
 			return fmt.Errorf("query archive period tokens (%s): %w", source, err)
 		}
@@ -286,10 +289,10 @@ func QueryPeriodTokens(ctx context.Context, db sqlQueryer, client Client, start,
 	if client.includesCodex() {
 		const q = `
 			SELECT
-			  COALESCE(SUM(COALESCE(input_token_count, 0) - COALESCE(cached_token_count, 0)), 0),
+			  COALESCE(SUM(COALESCE(input_token_count, 0) - COALESCE(cached_token_count, 0) - COALESCE(cache_write_token_count, 0)), 0),
 			  COALESCE(SUM(COALESCE(output_token_count, 0)), 0),
 			  COALESCE(SUM(COALESCE(input_token_count, 0) + COALESCE(output_token_count, 0)), 0)
-			FROM codex_event_token_usage
+			FROM codex_valid_token_usage
 			WHERE ts >= ? AND ts < ?
 		`
 		var c periodTokens
@@ -319,6 +322,9 @@ func QueryPeriodCost(ctx context.Context, db sqlQueryer, client Client, start, e
 	var total float64
 	if first, last, ok := archiveBounds(start, end); ok {
 		for _, source := range archiveClients(client) {
+			if source == ClientCodex {
+				continue
+			}
 			var v float64
 			if err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd), 0) FROM archive.usage_hourly WHERE client=? AND bucket_start>=? AND bucket_start<?`, source, first, last).Scan(&v); err != nil {
 				return 0, fmt.Errorf("query archive period cost (%s): %w", source, err)
@@ -335,7 +341,7 @@ func QueryPeriodCost(ctx context.Context, db sqlQueryer, client Client, start, e
 		total += v
 	}
 	if client.includesCodex() {
-		const q = `SELECT COALESCE(SUM(cost_usd), 0) FROM codex_event_token_usage WHERE ts >= ? AND ts < ?`
+		const q = `SELECT COALESCE(SUM(cost_usd), 0) FROM codex_selected_costs WHERE ts >= ? AND ts < ?`
 		var v float64
 		if err := db.QueryRowContext(ctx, q, start, end).Scan(&v); err != nil {
 			return 0, fmt.Errorf("query period cost (codex): %w", err)
@@ -396,22 +402,24 @@ func QueryPeriodCache(ctx context.Context, db sqlQueryer, client Client, start, 
 		const q = `
 			SELECT
 			  COALESCE(SUM(COALESCE(cached_token_count, 0)), 0),
-			  COALESCE(SUM(COALESCE(input_token_count, 0)), 0)
-			FROM codex_event_token_usage
+			  COALESCE(SUM(COALESCE(input_token_count, 0)), 0),
+              COALESCE(SUM(COALESCE(cache_write_token_count, 0)), 0)
+			FROM codex_valid_token_usage
 			WHERE ts >= ? AND ts < ?
 		`
-		var cached, input int64
-		if err := db.QueryRowContext(ctx, q, start, end).Scan(&cached, &input); err != nil {
+		var cached, input, creation int64
+		if err := db.QueryRowContext(ctx, q, start, end).Scan(&cached, &input, &creation); err != nil {
 			return pc, fmt.Errorf("query period cache (codex): %w", err)
 		}
 		pc.Read += cached
+		pc.Creation += creation
 		pc.HitDenom += input
 	}
 	return pc, nil
 }
 
 // QueryPeriodRequests — API request count. Codex counts response.completed
-// rows (codex_event_token_usage), NOT codex_event_api_request (attempt grain,
+// rows (codex_valid_token_usage), NOT codex_event_api_request (attempt grain,
 // includes retries).
 func QueryPeriodRequests(ctx context.Context, db sqlQueryer, client Client, start, end time.Time) (int64, error) {
 	var total int64
@@ -433,7 +441,7 @@ func QueryPeriodRequests(ctx context.Context, db sqlQueryer, client Client, star
 		total += v
 	}
 	if client.includesCodex() {
-		const q = `SELECT COUNT(*) FROM codex_event_token_usage WHERE ts >= ? AND ts < ?`
+		const q = `SELECT COUNT(*) FROM codex_valid_token_usage WHERE ts >= ? AND ts < ?`
 		var v int64
 		if err := db.QueryRowContext(ctx, q, start, end).Scan(&v); err != nil {
 			return 0, fmt.Errorf("query period requests (codex): %w", err)
@@ -505,7 +513,7 @@ func QueryTokensSparkline(ctx context.Context, db sqlQueryer, client Client, w T
 		q := fmt.Sprintf(`
 			SELECT CAST(%s AS DATE) AS bucket,
 			       SUM(COALESCE(input_token_count, 0) + COALESCE(output_token_count, 0)) AS total
-			FROM codex_event_token_usage
+			FROM codex_valid_token_usage
 			WHERE ts >= ? AND ts < ?
 			GROUP BY 1 ORDER BY 1
 		`, localGrainExpr(w, "ts", grain))
@@ -527,6 +535,9 @@ func QueryCostSparkline(ctx context.Context, db sqlQueryer, client Client, w Tim
 	byBucket := map[time.Time]float64{}
 	if first, last, ok := archiveBounds(start, end); ok {
 		for _, source := range archiveClients(client) {
+			if source == ClientCodex {
+				continue
+			}
 			q := fmt.Sprintf(`SELECT CAST(%s AS DATE), COALESCE(SUM(cost_usd), 0) FROM archive.usage_hourly WHERE client=? AND bucket_start>=? AND bucket_start<? GROUP BY 1`, localGrainExpr(w, "bucket_start", grain))
 			rows, err := db.QueryContext(ctx, q, source, first, last)
 			if err != nil {
@@ -576,7 +587,7 @@ func QueryCostSparkline(ctx context.Context, db sqlQueryer, client Client, w Tim
 		}
 	}
 	if client.includesCodex() {
-		if err := add("codex_event_token_usage", "COALESCE(cost_usd, 0)"); err != nil {
+		if err := add("codex_selected_costs", "COALESCE(cost_usd, 0)"); err != nil {
 			return nil, err
 		}
 	}
@@ -614,7 +625,7 @@ func QueryRequestsSparkline(ctx context.Context, db sqlQueryer, client Client, w
 	if client.includesCodex() {
 		q := fmt.Sprintf(`
 			SELECT CAST(%s AS DATE) AS bucket, COUNT(*) AS total
-			FROM codex_event_token_usage
+			FROM codex_valid_token_usage
 			WHERE ts >= ? AND ts < ?
 			GROUP BY 1 ORDER BY 1
 		`, localGrainExpr(w, "ts", grain))
@@ -634,20 +645,23 @@ func QueryRequestsSparkline(ctx context.Context, db sqlQueryer, client Client, w
 // ─────────────────────────────────────────────────────────────────────
 
 type modelTokens struct {
-	Model                  string
-	Client                 Client
-	TokenRows              int64
-	FromArchive            bool
-	TokensIn               int64
-	TokensOut              int64
-	CacheTokens            int64
-	ReasoningTokens        int64
-	InputCost              float64
-	OutputCost             float64
-	CacheReadCost          float64
-	InputCostAvailable     bool
-	OutputCostAvailable    bool
-	CacheReadCostAvailable bool
+	CacheWriteTokens        int64
+	CacheWriteCost          float64
+	CacheWriteCostAvailable bool
+	Model                   string
+	Client                  Client
+	TokenRows               int64
+	FromArchive             bool
+	TokensIn                int64
+	TokensOut               int64
+	CacheTokens             int64
+	ReasoningTokens         int64
+	InputCost               float64
+	OutputCost              float64
+	CacheReadCost           float64
+	InputCostAvailable      bool
+	OutputCostAvailable     bool
+	CacheReadCostAvailable  bool
 }
 
 func QueryModelTokens(ctx context.Context, db sqlQueryer, client Client) ([]modelTokens, error) {
@@ -665,6 +679,7 @@ func QueryModelTokens(ctx context.Context, db sqlQueryer, client Client) ([]mode
 				&r.TokensOut,
 				&r.CacheTokens,
 				&r.ReasoningTokens,
+				&r.CacheWriteTokens,
 			); err != nil {
 				return nil, fmt.Errorf("scan %s: %w", label, err)
 			}
@@ -678,19 +693,19 @@ func QueryModelTokens(ctx context.Context, db sqlQueryer, client Client) ([]mode
 	var out []modelTokens
 	var err error
 	for _, source := range archiveClients(client) {
-		const q = `SELECT model, COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(token_rows), 0) FROM archive.usage_hourly WHERE client=? AND model<>'' AND token_rows>0 GROUP BY model`
+		const q = `SELECT model, COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(token_rows), 0), COALESCE(SUM(CASE WHEN client='codex' THEN cache_creation_tokens ELSE 0 END), 0) FROM archive.usage_hourly WHERE client=? AND model<>'' AND token_rows>0 GROUP BY model`
 		rows, queryErr := db.QueryContext(ctx, q, source)
 		if queryErr != nil {
 			return nil, fmt.Errorf("query archive model tokens (%s): %w", source, queryErr)
 		}
 		for rows.Next() {
 			var r modelTokens
-			if err := rows.Scan(&r.Model, &r.TokensIn, &r.TokensOut, &r.CacheTokens, &r.ReasoningTokens, &r.TokenRows); err != nil {
+			if err := rows.Scan(&r.Model, &r.TokensIn, &r.TokensOut, &r.CacheTokens, &r.ReasoningTokens, &r.TokenRows, &r.CacheWriteTokens); err != nil {
 				_ = rows.Close()
 				return nil, fmt.Errorf("scan archive model tokens (%s): %w", source, err)
 			}
 			if source == ClientCodex {
-				r.TokensIn -= r.CacheTokens
+				r.TokensIn -= r.CacheTokens + r.CacheWriteTokens
 			}
 			r.FromArchive = true
 			r.Client = source
@@ -711,7 +726,7 @@ func QueryModelTokens(ctx context.Context, db sqlQueryer, client Client) ([]mode
 			  COALESCE(SUM(CASE WHEN type='input'     THEN value END), 0) AS tokens_in,
 			  COALESCE(SUM(CASE WHEN type='output'    THEN value END), 0) AS tokens_out,
 			  COALESCE(SUM(CASE WHEN type='cacheRead' THEN value END), 0) AS cache_tokens,
-			  0 AS reasoning_tokens
+			  0 AS reasoning_tokens, 0 AS cache_write_tokens
 			FROM metric_token_usage
 			WHERE model IS NOT NULL
 			GROUP BY model
@@ -722,14 +737,15 @@ func QueryModelTokens(ctx context.Context, db sqlQueryer, client Client) ([]mode
 	}
 	if client.includesCodex() {
 		// Same projection rule as QueryPeriodTokens: in excludes the cached
-		// subset so in+out+cache equals the codex total exactly.
+		// subsets so in+out+cache-read+cache-write equals the Codex total.
 		const q = `
 			SELECT model,
-			  COALESCE(SUM(COALESCE(input_token_count, 0) - COALESCE(cached_token_count, 0)), 0) AS tokens_in,
+			  COALESCE(SUM(COALESCE(input_token_count, 0) - COALESCE(cached_token_count, 0) - COALESCE(cache_write_token_count, 0)), 0) AS tokens_in,
 			  COALESCE(SUM(COALESCE(output_token_count, 0)), 0)                                   AS tokens_out,
 			  COALESCE(SUM(COALESCE(cached_token_count, 0)), 0)                                   AS cache_tokens,
-			  COALESCE(SUM(COALESCE(reasoning_token_count, 0)), 0)                                AS reasoning_tokens
-			FROM codex_event_token_usage
+			  COALESCE(SUM(COALESCE(reasoning_token_count, 0)), 0)                                AS reasoning_tokens,
+              COALESCE(SUM(COALESCE(cache_write_token_count, 0)), 0) AS cache_write_tokens
+			FROM codex_valid_token_usage
 			WHERE model IS NOT NULL
 			GROUP BY model
 		`
@@ -750,6 +766,9 @@ type modelCost struct {
 func QueryModelCost(ctx context.Context, db sqlQueryer, client Client) ([]modelCost, error) {
 	byModel := map[string]float64{}
 	for _, source := range archiveClients(client) {
+		if source == ClientCodex {
+			continue
+		}
 		rows, err := db.QueryContext(ctx, `SELECT model, COALESCE(SUM(cost_usd), 0) FROM archive.usage_hourly WHERE client=? AND model<>'' GROUP BY model`, source)
 		if err != nil {
 			return nil, fmt.Errorf("query archive model cost (%s): %w", source, err)
@@ -792,7 +811,7 @@ func QueryModelCost(ctx context.Context, db sqlQueryer, client Client) ([]modelC
 		}
 	}
 	if client.includesCodex() {
-		if err := add("codex_event_token_usage", "COALESCE(cost_usd, 0)"); err != nil {
+		if err := add("(SELECT * FROM codex_selected_costs WHERE sample_count > 0)", "COALESCE(cost_usd, 0)"); err != nil {
 			return nil, err
 		}
 	}
@@ -862,7 +881,7 @@ func QueryModelRequests(ctx context.Context, db sqlQueryer, client Client) ([]mo
 	if client.includesCodex() {
 		const q = `
 			SELECT model, COUNT(*) AS requests
-			FROM codex_event_token_usage
+			FROM codex_valid_token_usage
 			WHERE model IS NOT NULL
 			GROUP BY model
 		`
@@ -943,7 +962,7 @@ func QueryTrends(ctx context.Context, db sqlQueryer, client Client, w TimeWindow
 		q := fmt.Sprintf(`
 			SELECT CAST(%s AS DATE) AS bucket_sh, model,
 			       SUM(COALESCE(input_token_count, 0) + COALESCE(output_token_count, 0)) AS tokens
-			FROM codex_event_token_usage
+			FROM codex_valid_token_usage
 			WHERE ts >= ? AND model IS NOT NULL
 			GROUP BY 1, 2 ORDER BY 1
 		`, localGrainExpr(w, "ts", grain))
@@ -1279,6 +1298,7 @@ func QuerySessionSkillBreakdown(ctx context.Context, db sqlQueryer, sessionID st
 // sessionListRow is the raw per-session aggregate scanned from QuerySessionList;
 // BuildSessionList formats the timestamps into the wire SessionSummary.
 type sessionListRow struct {
+	CostMetadata
 	SessionID string
 	Client    string
 	FirstTs   time.Time
@@ -1298,7 +1318,9 @@ const claudeActivityArms = `
 	  UNION ALL SELECT session_id, ts, 'claude' FROM metric_token_usage    WHERE session_id IS NOT NULL`
 
 const codexActivityArms = `
-	  SELECT conversation_id, ts, 'codex' AS client FROM codex_event_token_usage         WHERE conversation_id IS NOT NULL
+	  SELECT conversation_id, ts, 'codex' AS client FROM codex_skill_invocations WHERE conversation_id IS NOT NULL
+ UNION ALL SELECT conversation_id, ts, 'codex' FROM codex_native_turn_costs WHERE conversation_id IS NOT NULL
+ UNION ALL SELECT conversation_id, ts, 'codex' FROM codex_event_token_usage         WHERE conversation_id IS NOT NULL
 	  UNION ALL SELECT conversation_id, ts, 'codex' FROM codex_event_user_prompt         WHERE conversation_id IS NOT NULL
 	  UNION ALL SELECT conversation_id, ts, 'codex' FROM codex_event_tool_result         WHERE conversation_id IS NOT NULL
 	  UNION ALL SELECT conversation_id, ts, 'codex' FROM codex_event_conversation_starts WHERE conversation_id IS NOT NULL`
@@ -1338,13 +1360,15 @@ func QueryCodexSessionTimespan(ctx context.Context, db sqlQueryer, conversationI
 	const q = `
 		WITH activity AS (
 		  SELECT ts FROM codex_event_token_usage         WHERE conversation_id = ?
+          UNION ALL SELECT ts FROM codex_skill_invocations WHERE conversation_id = ?
+          UNION ALL SELECT ts FROM codex_native_turn_costs WHERE conversation_id = ?
 		  UNION ALL SELECT ts FROM codex_event_user_prompt         WHERE conversation_id = ?
 		  UNION ALL SELECT ts FROM codex_event_tool_result         WHERE conversation_id = ?
 		  UNION ALL SELECT ts FROM codex_event_conversation_starts WHERE conversation_id = ?
 		)
 		SELECT MIN(ts), MAX(ts) FROM activity
 	`
-	row := db.QueryRowContext(ctx, q, conversationID, conversationID, conversationID, conversationID)
+	row := db.QueryRowContext(ctx, q, conversationID, conversationID, conversationID, conversationID, conversationID, conversationID)
 	if err = row.Scan(&rawFirst, &rawLast); err != nil {
 		return first, last, fmt.Errorf("query codex session timespan: %w", err)
 	}
@@ -1361,7 +1385,7 @@ func QueryCodexSessionTimespan(ctx context.Context, db sqlQueryer, conversationI
 // dimensions for the detail card.
 func QueryCodexSessionTokens(ctx context.Context, db sqlQueryer, conversationID string) (total int64, detail SessionTokenDetail, err error) {
 	var archiveTotal int64
-	if err = db.QueryRowContext(ctx, `SELECT tokens_total, input_tokens, output_tokens, cache_read_tokens, reasoning_tokens FROM archive.sessions WHERE client='codex' AND session_id=?`, conversationID).Scan(&archiveTotal, &detail.Input, &detail.Output, &detail.Cached, &detail.Reasoning); err != nil && err != sql.ErrNoRows {
+	if err = db.QueryRowContext(ctx, `SELECT tokens_total, input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, COALESCE(cache_write_tokens, 0) FROM archive.sessions WHERE client='codex' AND session_id=?`, conversationID).Scan(&archiveTotal, &detail.Input, &detail.Output, &detail.Cached, &detail.Reasoning, &detail.CacheWrite); err != nil && err != sql.ErrNoRows {
 		return 0, detail, fmt.Errorf("query archive codex session tokens: %w", err)
 	}
 	var rawDetail SessionTokenDetail
@@ -1372,24 +1396,26 @@ func QueryCodexSessionTokens(ctx context.Context, db sqlQueryer, conversationID 
 		  COALESCE(SUM(COALESCE(input_token_count, 0)), 0),
 		  COALESCE(SUM(COALESCE(output_token_count, 0)), 0),
 		  COALESCE(SUM(COALESCE(cached_token_count, 0)), 0),
-		  COALESCE(SUM(COALESCE(reasoning_token_count, 0)), 0)
-		FROM codex_event_token_usage
+		  COALESCE(SUM(COALESCE(reasoning_token_count, 0)), 0),
+          COALESCE(SUM(COALESCE(cache_write_token_count, 0)), 0)
+		FROM codex_valid_token_usage
 		WHERE conversation_id = ?
 	`
-	err = db.QueryRowContext(ctx, q, conversationID).Scan(&rawTotal, &rawDetail.Input, &rawDetail.Output, &rawDetail.Cached, &rawDetail.Reasoning)
+	err = db.QueryRowContext(ctx, q, conversationID).Scan(&rawTotal, &rawDetail.Input, &rawDetail.Output, &rawDetail.Cached, &rawDetail.Reasoning, &rawDetail.CacheWrite)
 	if err != nil {
 		return 0, detail, fmt.Errorf("query codex session tokens: %w", err)
 	}
 	detail.Input += rawDetail.Input
 	detail.Output += rawDetail.Output
 	detail.Cached += rawDetail.Cached
+	detail.CacheWrite += rawDetail.CacheWrite
 	detail.Reasoning += rawDetail.Reasoning
 	return archiveTotal + rawTotal, detail, nil
 }
 
 // QueryCodexSessionRequests — completed-response count for one conversation.
 func QueryCodexSessionRequests(ctx context.Context, db sqlQueryer, conversationID string) (int64, error) {
-	const q = `SELECT COUNT(*) FROM codex_event_token_usage WHERE conversation_id = ?`
+	const q = `SELECT COUNT(*) FROM codex_valid_token_usage WHERE conversation_id = ?`
 	var v int64
 	if err := db.QueryRowContext(ctx, `SELECT COALESCE(request_count, 0) FROM archive.sessions WHERE client='codex' AND session_id=?`, conversationID).Scan(&v); err != nil && err != sql.ErrNoRows {
 		return 0, fmt.Errorf("query archive codex session requests: %w", err)
@@ -1476,16 +1502,8 @@ func QueryClaudeSessionCost(ctx context.Context, db sqlQueryer, sessionID string
 
 // QueryCodexSessionCost returns a codex conversation's estimated all-time cost.
 func QueryCodexSessionCost(ctx context.Context, db sqlQueryer, conversationID string) (float64, error) {
-	const q = `SELECT COALESCE(SUM(cost_usd), 0) FROM codex_event_token_usage WHERE conversation_id = ?`
-	var v float64
-	if err := db.QueryRowContext(ctx, `SELECT COALESCE(cost_usd, 0) FROM archive.sessions WHERE client='codex' AND session_id=?`, conversationID).Scan(&v); err != nil && err != sql.ErrNoRows {
-		return 0, fmt.Errorf("query archive codex session cost: %w", err)
-	}
-	var raw float64
-	if err := db.QueryRowContext(ctx, q, conversationID).Scan(&raw); err != nil {
-		return 0, fmt.Errorf("query codex session cost: %w", err)
-	}
-	return v + raw, nil
+	result, err := queryCodexCost(ctx, db, codexCostFilter{ConversationID: conversationID})
+	return result.Total, err
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1772,11 +1790,11 @@ func QueryThroughputBuckets(ctx context.Context, db sqlQueryer, client Client, s
 	if client.includesCodex() {
 		const q = `
 			SELECT date_trunc('hour', ts) AS h,
-			  COALESCE(SUM(GREATEST(COALESCE(input_token_count, 0) - COALESCE(cached_token_count, 0), 0)), 0),
+			  COALESCE(SUM(GREATEST(COALESCE(input_token_count, 0) - COALESCE(cached_token_count, 0) - COALESCE(cache_write_token_count, 0), 0)), 0),
 			  COALESCE(SUM(COALESCE(output_token_count, 0)), 0),
 			  COALESCE(SUM(COALESCE(cached_token_count, 0)), 0),
-			  0
-			FROM codex_event_token_usage
+			  COALESCE(SUM(COALESCE(cache_write_token_count, 0)), 0)
+			FROM codex_valid_token_usage
 			WHERE ts >= ? AND ts < ?
 			GROUP BY 1
 		`
@@ -1867,7 +1885,7 @@ func QuerySeenModels(ctx context.Context, db sqlQueryer, client Client) ([]seenM
 	if client.includesCodex() {
 		const q = `
 			SELECT model, MAX(ts), COUNT(*)
-			FROM codex_event_token_usage
+			FROM codex_valid_token_usage
 			WHERE model IS NOT NULL AND model <> '' AND model NOT LIKE '<%'
 			GROUP BY model
 		`

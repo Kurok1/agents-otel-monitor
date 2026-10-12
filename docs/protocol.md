@@ -5,7 +5,7 @@
 | Harness | 纳入的 Metrics | 纳入的 Events | 协议章节 |
 |---|---:|---:|---|
 | Claude Code | 8 | 11 | §2 |
-| OpenAI Codex CLI | 2 | 6 | §3 |
+| OpenAI Codex CLI | 3 | 8 | §3 |
 
 本文档只描述已持久化的信号。Claude Code 的 `api_request_body` / `api_response_body`、`internal_error`、`auth`、`plugin_installed` / `plugin_loaded`、`hook_*`，以及 Codex 的高容量或 Dashboard 暂不需要的事件，均不在当前持久化范围内。
 
@@ -41,7 +41,7 @@ NumberDataPoint {
 }
 ```
 
-Codex 的 TBT 指标是 **DELTA Histogram**，接收端只保存 `count` 与 `sum`，不展开 buckets：
+Codex 的 TBT 与 turn token 指标是 **DELTA Histogram**，接收端只保存 `count` 与 `sum`，不展开 buckets：
 
 ```
 HistogramDataPoint {
@@ -393,54 +393,78 @@ prompt 中的 `@`-mention 被解析时记录。
 
 ## 3. OpenAI Codex CLI 遥测
 
-Codex CLI 的持久化映射自 v2.2 引入，当前包含 6 个核心 Logs 事件以及 Dashboard 所需的 Skill 与 TBT Metrics（调研与决策见 `docs/superpowers/specs/2026-07-01-codex-otel-support-design.md`，本节 Metrics 实测基线 codex-cli 0.145.0）。
+当前接入 8 个 Logs 事件、3 个 Metrics。新增字段以官方 codex-cli 0.162.1（commit `092d3acd6bec3e3a14bdc7e7a2810ab628ab759d`）为协议基线；兼容旧版缺字段的记录，原有 Metrics fixture 基线为 0.145.0。
 
 ### 3.1 客户端配置
 
-Codex **不读取标准 OTEL 环境变量**，只认 `~/.codex/config.toml` 的 `[otel]` 段；Logs 与 Metrics 都需要指向本服务：
+导出地址通过 `~/.codex/config.toml` 配置，Logs 与 Metrics 分别启用：
 
 ```toml
 [otel]
 environment = "prod"
+log_user_prompt = false
 exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
 metrics_exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
+
+[analytics]
+enabled = true  # Metrics 导出需要启用 analytics
 ```
+
+在启动 Codex 的环境中设置 `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=DELTA`。本服务拒绝累计型数据，以免重复计数；不能用标准 endpoint 环境变量代替上述 exporter 配置。历史未导出的新事件不能补采。
 
 ### 3.2 Resource 与公共属性
 
-- Resource：`service.name` = originator（如 `codex_cli_rs` / `codex_exec` / `codex_vscode`）、`service.version`、`env`、`host.name`，均不提取（落 `attrs`）
-- 每条事件的公共 attribute：`conversation.id`、`app.version`、`auth_mode`（`ApiKey` / `Chatgpt`）、`originator`、`terminal.type`、`model`、`slug`、`user.account_id`（可空）、`user.email`（可空）
-- **没有 `user.id`**：codex 表族无身份硬约束，统一身份在查询层 `COALESCE(user_account_id, user_email, 'unknown')`
-- 事件名在 `event.name` attribute，**完整带 `codex.` 前缀**（实测确认）
-- **时间戳**：Codex 不设置 LogRecord 的 `time_unix_nano`（恒为 0，实测确认）。接收端按 `time_unix_nano` → `observed_time_unix_nano` → `event.timestamp` attribute（RFC3339）三级回退解析
+- Resource 的 `service.name`、`service.version`、`env`、`host.name` 落入 `attrs`；已识别属性按数据点覆盖 Resource 的顺序提取。
+- 公共属性：`conversation.id`、`app.version`、`auth_mode`、`originator`、`terminal.type`、`model`、`slug`、`user.account_id`、`user.email`。身份字段可空，没有 Claude 的 `user.id` 硬约束。
+- 事件名来自完整带 `codex.` 前缀的 `event.name`。
+- 时间戳回退顺序为 `time_unix_nano` → `observed_time_unix_nano` → RFC3339 `event.timestamp`。当前 Codex Logs 通常不设置第一项。
 
-### 3.3 入库事件（6 个）
+### 3.3 入库事件（8 个）
 
-| 事件 | 入库表 | 关键专有属性 |
+| 事件 | 入库表 | 专有属性与语义 |
 |---|---|---|
-| `codex.conversation_starts` | `codex_event_conversation_starts` | `provider_name`、`reasoning_effort`、`reasoning_summary`、`context_window`、`auto_compact_token_limit`、`approval_policy`、`sandbox_policy`、`mcp_servers`；`auth.env_*` 落 attrs |
-| `codex.api_request` | `codex_event_api_request` | `duration_ms`、`http.response.status_code`、`error.message`、`attempt`、`endpoint`；`auth.*` 落 attrs。注意是 **HTTP attempt 粒度**（含重试） |
-| `codex.sse_event` | `codex_event_token_usage` | **仅 `event.kind = response.completed` 落库**，其余 kind 计入 skipped 不持久化（量大且无用量数据）。字段：`input_token_count` / `output_token_count` / `cached_token_count`(可空) / `reasoning_token_count`(可空) / `tool_token_count`、`service_tier`、`model_reasoning_effort`、`duration_ms` |
-| `codex.user_prompt` | `codex_event_user_prompt` | `prompt_length`、`prompt`（默认 `"[REDACTED]"`，需客户端 `log_user_prompt = true`） |
-| `codex.tool_decision` | `codex_event_tool_decision` | `tool_name`、`call_id`、`decision`（原始枚举：`approved` / `approved_for_session` / `denied` / `abort` / `timed_out` 等）、`source`（`AutomatedReviewer` / `Config` / `User`） |
-| `codex.tool_result` | `codex_event_tool_result` | `tool_name`、`call_id`、`duration_ms`、`success`、`mcp_server`、`mcp_server_origin`；**`arguments` / `output` 原文只算长度即丢弃**（隐私红线：Codex 默认不脱敏且无客户端开关），落列 `arguments_length` / `output_length` |
+| `codex.conversation_starts` | `codex_event_conversation_starts` | `provider_name`、`reasoning_effort`、`reasoning_summary`、`context_window`、`auto_compact_token_limit`、`approval_policy`、`sandbox_policy`、`mcp_servers` |
+| `codex.api_request` | `codex_event_api_request` | `duration_ms`、`http.response.status_code`、`error.message`、`attempt`、`endpoint`；HTTP attempt 粒度，含重试 |
+| `codex.sse_event` | `codex_event_token_usage` | 只保留 `event.kind=response.completed`；input/output/cached/cache_write/reasoning/tool 的 `*_token_count`，`ttft_ms`、`error.message`、`service_tier`、`model_reasoning_effort`、旧版 `duration_ms` |
+| `codex.user_prompt` | `codex_event_user_prompt` | `prompt_length`、`prompt`（默认 `[REDACTED]`） |
+| `codex.tool_decision` | `codex_event_tool_decision` | `tool_name`、`call_id`、原始 `decision`、`source` |
+| `codex.tool_result` | `codex_event_tool_result` | `tool_name`、`call_id`、`duration_ms`、`success`、`mcp_server`、`mcp_server_origin`、可空 `output_truncated`；`arguments` / `output` 只算字节长度即丢弃，不能落列或落 attrs |
+| `codex.skill_invocation` | `codex_event_skill_invocation` | `turn.id`、`skill.name`、`skill.scope`、`skill.plugin_id`、`skill.invocation_type=explicit/implicit`；要求 conversation、turn、skill 名称 |
+| `codex.turn_cost` | `codex_event_turn_cost` | `turn.id`、十进制字符串 `usage.estimated_usd`、`turn.interrupted`、`speed`、`reasoning_effort`；要求 conversation、turn 和有效非负金额 |
 
-范围外（识别但不落库，计入 Unknown）：`codex.startup_phase`、`codex.websocket_connect` / `websocket_request`、`codex.auth_recovery`、`codex.turn_ttft`、`codex.sandbox_outcome`、`codex.network_proxy.policy_decision`、`codex.plugin_install_*`。
+`response.completed` 也会承载错误。只有没有非空错误且 input/output 都存在、非负、子集计数合法、总量不溢出的记录，才进入 token、请求数与本地计价统计；有效零用量仍计作一次请求。错误记录保留用于诊断与会话活动。缺少 TTFT、缓存写入或截断标志保持 NULL，不伪造观测值。
 
-### 3.4 入库 Metrics（2 个）
+`ttft_ms` 是开始读取响应流到首次输出（含推理输出）的延迟，不含此前的建连、响应头等待。API 给出样本数、均值、nearest-rank P50/P95；无样本为 NULL。`output_length` 是收到的 **输出预览** 的字节数，不能作为完整工具输出大小；NULL 截断标志不等于 false。
+
+Skill 会话统计按 `(conversation_id, turn_id, skill_name, plugin_id, invocation_type)` 去重，分别计显式与隐式调用。全局排名仍使用成功的 Skill 注入 Metric，两者不相加。
+
+范围外事件（计入 Unknown）包括启动阶段、WebSocket、sandbox、network proxy 及插件安装事件。
+
+### 3.4 入库 Metrics（3 个）
 
 | Metric | OTLP 形态 | 入库表 | 用途 |
 |---|---|---|---|
-| `codex.skill.injected` | monotonic DELTA Sum | `codex_metric_skill_injected` | 保存 `value`、`skill`、`status`、`invoke_type`、`session_source`；排名只累加 `status=ok/success` |
-| `codex.responses_api_engine_service_tbt.duration_ms` | DELTA Histogram | `codex_metric_response_tbt` | 每个 DataPoint 仅保存 `sample_count` 与 `sum_ms`，不展开 bucket；生成速度 = `sample_count × 1000 / sum_ms` |
+| `codex.skill.injected` | monotonic DELTA Sum | `codex_metric_skill_injected` | 保存 `value`、`skill`、`status`、`invoke_type`、`session_source`；排名仅累计 `status=ok/success` |
+| `codex.responses_api_engine_service_tbt.duration_ms` | DELTA Histogram | `codex_metric_response_tbt` | 保存 count/sum，速度估计 = `count × 1000 / sum_ms` |
+| `codex.turn.token_usage` | DELTA Histogram | `codex_metric_turn_token_usage` | 保存 count/sum、原始 model、token_type、session_source，用于回合与响应用量核对 |
 
-TBT 是相邻生成 token 的平均时间（time between tokens），适合作为 Codex 的纯解码速度。`codex.websocket_request.duration_ms` 实测只有 WebSocket 发送开销，并非模型生成耗时，不能用于该指标。Metrics 当前不带稳定的 request / turn ID，因此接收端不做时间戳模糊关联。
+Histogram 不展开 bucket。TBT 是服务端相邻 token 时间的速度估计，与墙钟吞吐或 TTFT 分开展示。Metrics 没有稳定 request/turn ID，不与响应做时间模糊 join。
 
-### 3.5 token 口径（与 Claude Code 的关键差异）
+Turn 对账按原始模型与 `total/input/cached_input/cache_write_input/output/reasoning_output` 六种类型分别比较。差值为 Turn 减 response，不回写主统计；其中子集不能相加为总量。跨窗口、导出缺失或重传会造成差异；任一来源缺失时差值为 NULL。可选 token 字段分别统计有效样本数，未上报不能冒充零用量。
 
-OpenAI 计数是**子集式**：`cached ⊂ input`、`reasoning ⊂ output`；Anthropic 是**并列式**（cacheRead / cacheCreation 独立于 input）。统一总量公式：
+### 3.5 token 与成本口径
 
-- Claude 总量 = `input + output + cacheRead + cacheCreation`
-- Codex 总量 = `input_token_count + output_token_count`（**不可再加 cached，否则重复计算**）
+- Claude 总量 = `input + output + cacheRead + cacheCreation`。
+- Codex 总量 = `input_token_count + output_token_count`；缓存读、缓存写是 input 的不重叠子集，reasoning 是 output 子集。
+- Codex 普通输入 = input − cached − cache_write；缓存命中率 = cached / input。
+- 本地计价：普通输入、缓存读、缓存写分别计价；缓存写使用 LiteLLM `cache_creation_input_token_cost`，缺失时退回普通输入价。显式零价保留。reasoning 只在 output 内拆分。
 
-Codex **不上报成本（cost_usd）**，也没有 lines_of_code / commit / PR 类指标。自 v2.4.0 起，本项目可选地在 ingest 时按 LiteLLM 计价表**估算** Codex 的 `cost_usd` 并落入 `codex_event_token_usage.cost_usd`（由 `pricing.enabled` 门控，默认关闭；详见 `docs/models.md` 与 `config.example.yaml` 的 `pricing` 段）。此为估算值，与 Claude 客户端自报的权威成本语义不同。
+成本同时保留两个估算来源：原生 `codex.turn_cost` 与写入时冻结的本地 LiteLLM `cost_usd`。原生金额按字符串保存，并通过 DECIMAL 校验；相同 conversation+turn 选择最新事件（再按 received_at 排序），两个时间均相同时按 DECIMAL(38,18) 数值取较大金额，原始查询与归档使用相同规则。有效零金额不能当作缺失。
+
+**先跨全历史按会话选择来源，再过滤查询时间窗口**：会话一旦有原生成本，就只用已观测到的原生成本；否则用本地估算。不用本地值补齐原生回合，覆盖率始终未知。原生金额归属其事件时间；迟到原生事件可能改变以前窗口的选源。未接入 `codex.turn.cost` Metric，以免与日志重复计费。
+
+`pricing.enabled` 只控制价目表加载与新本地估算。关闭后，已保存的本地成本和原生成本仍可见。API 的 `cost_available` 区分未知与零，`cost_source` 区分 native/local/legacy/mixed/unknown，另提供 `native_turn_count`、`cost_coverage=unknown`、`legacy_cost_included`、`local_estimate_usd`（独立参考值）。Claude 自报成本仍是 authoritative。
+
+原生成本由 Codex 后台查询计价端点后尽力上报，可能延迟、缺失或被中断，不是结算账单。TTFT 与 Turn 对账入口：`GET /api/usage/codex/telemetry?range=day|week|month`。
+
+官方来源：[session telemetry](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/otel/src/events/session_telemetry.rs)、[Skill invocation](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/otel/src/skill_invocation.rs)、[Turn tokens](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/core/src/state/turn_token_usage.rs)。

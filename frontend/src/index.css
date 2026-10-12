@@ -1369,3 +1369,13 @@ body[data-theme="dark"] .heatmap-cell[data-level="0"] { fill: var(--bg-alt); }
     min-width: 0;
   }
 }
+
+.telemetry-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin: 18px 0; }
+.telemetry-stats > div { display: flex; flex-direction: column; gap: 6px; }
+.telemetry-stats span { color: var(--fg-3); font-size: 12px; }
+.telemetry-stats strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.telemetry-table-scroll, .model-table-scroll { overflow-x: auto; max-width: 100%; }
+.telemetry-table-scroll table { min-width: 650px; }
+.model-table-scroll table { min-width: 760px; }
+.codex-telemetry .card-sub { line-height: 1.7; }
+@media (max-width: 640px) { .telemetry-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

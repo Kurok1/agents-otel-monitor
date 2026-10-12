@@ -6,7 +6,8 @@ import type { ChartSeries } from './components/charts/StackedAreaChart';
 import { SpeedGauge } from './components/charts/SpeedGauge';
 import { DonutChart } from './components/charts/DonutChart';
 import { CalendarHeatmap } from './components/charts/CalendarHeatmap';
-import { TweaksPanel, useTweaks } from './components/TweaksPanel';
+import { TweaksPanel } from './components/TweaksPanel';
+import { useTweaks } from './components/tweaks';
 import { Dashboard } from './api/dashboard';
 import type { DashboardData, Range, Since, Client } from './api/dashboard';
 import { formatCurrency, formatPct, formatTokens } from './lib/format';
@@ -14,6 +15,8 @@ import { TOOL_PALETTE, SKILL_PALETTE } from './lib/palette';
 import { SessionsView } from './views/SessionsView';
 import { SessionDetailView } from './views/SessionDetailView';
 import { PricingView } from './views/PricingView';
+import { CodexTelemetryPanel } from './components/CodexTelemetryPanel';
+import { costSourceLabel } from './api/codex-telemetry';
 
 function useAnimated(target: number, duration = 700): number {
   const [val, setVal] = useState(0);
@@ -118,8 +121,10 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    setRefreshing(true);
-    Dashboard.fetch(range, since, client)
+    Promise.resolve().then(() => {
+      if (!cancelled) setRefreshing(true);
+      return Dashboard.fetch(range, since, client);
+    })
       .then(d => {
         if (!cancelled) {
           setData(d);
@@ -428,17 +433,17 @@ export default function App() {
             sparkValues={data.tokens.sparkline}
             animate
           />
-          {(client !== 'codex' || data.cost.cost_estimated) && (
+          {(
             <KpiCard
               icon="dollar"
               label={`${rangePrefix}消费金额${data.cost.cost_estimated ? '(含估算)' : ''}`}
-              value={data.cost.total}
+              value={data.cost.cost_available === false ? '未知' : data.cost.total}
               unit="USD"
-              delta={costDelta}
+              delta={data.cost.cost_available === false ? undefined : costDelta}
               precision={2}
               foot={
                 <>
-                  {prevLabel} <strong>${data.cost.prev_total.toFixed(2)}</strong>
+                  {client !== 'claude' && <>{costSourceLabel(data.cost)} · </>}{prevLabel} <strong>${data.cost.prev_total.toFixed(2)}</strong>
                 </>
               }
               sparkValues={data.cost.sparkline}
@@ -556,7 +561,7 @@ export default function App() {
           <div>
             <h2>生产速率</h2>
             <p>
-              生成速度每分钟刷新 · 吞吐率 {RATES_WINDOW_LABEL[range]}，按墙钟时间归一
+              TBT 生成速度为估计值，每分钟刷新 · 吞吐率 {RATES_WINDOW_LABEL[range]}，按墙钟时间归一
             </p>
           </div>
         </div>
@@ -654,8 +659,8 @@ export default function App() {
           <section className="card">
             <div className="card-head">
               <div>
-                <h3>Skill 激活次数</h3>
-                <div className="card-sub">{totalSkillActivations.toLocaleString()} 次累计</div>
+                <h3>{client === 'codex' ? 'Skill 成功注入次数' : 'Skill 激活次数'}</h3>
+                <div className="card-sub">{totalSkillActivations.toLocaleString()} 次累计{client !== 'claude' && ' · Codex 按成功注入统计'}</div>
               </div>
             </div>
             <div className="rank">
@@ -683,6 +688,8 @@ export default function App() {
           </section>
         </div>
 
+        {client !== 'claude' && <CodexTelemetryPanel data={data.codexTelemetry} />}
+        {client !== 'claude' && data.cost.local_estimate_usd != null && <p className="card-sub">本地估价参考：{formatCurrency(data.cost.local_estimate_usd)}。已按会话选源，不与原生估值相加。</p>}
         <section className="card">
           <div className="card-head">
             <div>
@@ -690,7 +697,7 @@ export default function App() {
               <div className="card-sub">累计请求 / Tokens / 费用</div>
             </div>
           </div>
-          <table className="model-table">
+          <div className="model-table-scroll"><table className="model-table">
             <thead>
               <tr>
                 <th>模型</th>
@@ -698,7 +705,7 @@ export default function App() {
                 <th className="num">输入 Tokens / 费用</th>
                 <th className="num">输出 Tokens / 费用</th>
                 <th className="num">缓存读取 / 费用</th>
-                {(client !== 'codex' || data.cost.cost_estimated) && <th className="num">费用</th>}
+                <th className="num">缓存写入 / 费用</th><th className="num">费用</th>
                 <th className="num" style={{ minWidth: 140 }}>
                   占比
                 </th>
@@ -735,9 +742,10 @@ export default function App() {
                       <small>{formatComponentCost(m.cache_read_cost)}</small>
                     </div>
                   </td>
-                  {(client !== 'codex' || data.cost.cost_estimated) && (
+                  <td className="num"><div className="token-cost-cell"><span>{formatTokens(m.cache_write_tokens)}</span><small>{formatComponentCost(m.cache_write_cost)}</small></div></td>
+                  {(
                     <td className="num">
-                      <strong>{formatCurrency(m.cost)}</strong>
+                      <strong>{m.cost_available === false ? '未知' : formatCurrency(m.cost)}</strong>
                     </td>
                   )}
                   <td className="num">
@@ -751,9 +759,9 @@ export default function App() {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
           <div className="card-sub model-cost-note">
-            分项费用按当前模型价目表估算；Claude 总费用以客户端上报为准，可能与分项之和不同。
+            分项费用按当前模型价目表估算；Claude 总费用以自报为准；Codex 总费用按会话优先采用原生估值，否则使用写入时保存的本地估价，可能与当前分项之和不同。
           </div>
         </section>
 

@@ -92,6 +92,7 @@ func BuildPricingModels(ctx context.Context, db *sql.DB, client Client, prices P
 			pm.Matched = true
 			pm.InputPer1M = per1M(p.InputCostPerToken)
 			pm.OutputPer1M = per1M(p.OutputCostPerToken)
+			pm.CacheWritePer1M = per1M(p.CacheCreationInputTokenCost)
 			pm.CacheReadPer1M = per1M(p.CacheReadInputTokenCost)
 			pm.ReasoningOutputPer1M = per1M(p.OutputCostPerReasoningToken)
 		}
@@ -144,6 +145,7 @@ func BuildPricingCatalog(catalog PriceCatalogSource, enabled bool, prefix string
 	for _, entry := range entries {
 		resp.Models = append(resp.Models, CatalogPriceModel{
 			Model:                entry.Model,
+			CacheWritePer1M:      per1M(entry.Price.CacheCreationInputTokenCost),
 			InputPer1M:           per1M(entry.Price.InputCostPerToken),
 			OutputPer1M:          per1M(entry.Price.OutputCostPerToken),
 			CacheReadPer1M:       per1M(entry.Price.CacheReadInputTokenCost),

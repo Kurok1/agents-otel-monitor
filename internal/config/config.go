@@ -93,7 +93,8 @@ type ModelGroupRule struct {
 
 // PricingConfig configures the third-party cost-estimation engine (internal/pricing).
 // Disabled by default: when Enabled is false the engine is a no-op and codex
-// cost_usd stays NULL. SourceFile is the required local baseline (LiteLLM-format
+// new local cost_usd stays NULL; saved estimates and native turn costs are
+// unaffected. SourceFile is the required local baseline (LiteLLM-format
 // JSON — NOT vendored in this repo); SourceURL optionally refreshes it in the
 // background; Overrides are per-model hand rates layered on top (file < url < overrides).
 type PricingConfig struct {
@@ -110,6 +111,7 @@ type PriceOverride struct {
 	InputCostPerToken           *float64 `yaml:"input_cost_per_token"`
 	OutputCostPerToken          *float64 `yaml:"output_cost_per_token"`
 	CacheReadInputTokenCost     *float64 `yaml:"cache_read_input_token_cost"`
+	CacheCreationInputTokenCost *float64 `yaml:"cache_creation_input_token_cost"`
 	OutputCostPerReasoningToken *float64 `yaml:"output_cost_per_reasoning_token"`
 }
 
@@ -273,6 +275,7 @@ func validate(cfg *Config) error {
 				"input_cost_per_token":            o.InputCostPerToken,
 				"output_cost_per_token":           o.OutputCostPerToken,
 				"cache_read_input_token_cost":     o.CacheReadInputTokenCost,
+				"cache_creation_input_token_cost": o.CacheCreationInputTokenCost,
 				"output_cost_per_reasoning_token": o.OutputCostPerReasoningToken,
 			} {
 				if p != nil && *p < 0 {

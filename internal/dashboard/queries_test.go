@@ -532,9 +532,10 @@ func TestQueryPeriodCostIncludesCodex(t *testing.T) {
 }
 
 func TestSnapshotCostEstimatedFlag(t *testing.T) {
-	db, w, _ := testDB(t)
+	db, w, now := testDB(t)
 	ctx := context.Background()
 	c, _ := NewClassifier(nil)
+	insertCodexCostRow(t, db, now.Add(-time.Minute), "gpt-test", sql.NullFloat64{Float64: 0.5, Valid: true})
 
 	claude, err := BuildSnapshot(ctx, db, c, w, "day", ClientClaude, true, nil)
 	if err != nil {
@@ -548,8 +549,8 @@ func TestSnapshotCostEstimatedFlag(t *testing.T) {
 		t.Fatal("codex view with pricing enabled must be estimated")
 	}
 	codexOff, _ := BuildSnapshot(ctx, db, c, w, "day", ClientCodex, false, nil)
-	if codexOff.Cost.Estimated {
-		t.Fatal("codex view with pricing disabled must not be estimated")
+	if !codexOff.Cost.Estimated || !codexOff.Cost.Available || codexOff.Cost.Total != 0.5 {
+		t.Fatal("stored estimates remain available when local pricing is disabled")
 	}
 }
 
@@ -586,14 +587,14 @@ func TestSessionDetailCost(t *testing.T) {
 		t.Fatalf("claude cost should be authoritative 2.0, got %+v estimated=%v", resp.Cost, resp.CostEstimated)
 	}
 
-	// codex session: estimated cost, gated on pricingEnabled.
+	// Codex stored estimates remain visible regardless of current pricing config.
 	insertCodexCostRow(t, db, now, "gpt-5.5", sql.NullFloat64{Float64: 0.5, Valid: true}) // conversation_id = conv-1
 	on, found, _ := BuildSessionDetail(ctx, db, "conv-1", ClientCodex, 5, 5, true)
 	if !found || on.Cost == nil || *on.Cost != 0.5 || !on.CostEstimated {
 		t.Fatalf("codex enabled cost wrong: cost=%v estimated=%v found=%v", on.Cost, on.CostEstimated, found)
 	}
 	off, _, _ := BuildSessionDetail(ctx, db, "conv-1", ClientCodex, 5, 5, false)
-	if off.Cost != nil {
-		t.Fatalf("codex disabled cost must be nil, got %v", *off.Cost)
+	if off.Cost == nil || *off.Cost != 0.5 {
+		t.Fatalf("codex stored estimate missing with pricing disabled: %+v", off)
 	}
 }

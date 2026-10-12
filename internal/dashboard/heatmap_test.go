@@ -107,6 +107,51 @@ func TestBuildHeatmap_WeightScaleInvariant(t *testing.T) {
 	}
 }
 
+func TestBuildHeatmap_AllCostAvailability(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		claude       bool
+		codex        bool
+		observedZero bool
+		wantScore    float64
+	}{
+		{name: "claude unknown", claude: true, wantScore: 1},
+		{name: "codex unknown", codex: true, wantScore: 1},
+		{name: "both unknown", claude: true, codex: true, wantScore: 1},
+		{name: "claude observed zero", claude: true, observedZero: true, wantScore: 0.6},
+		{name: "codex observed zero", codex: true, observedZero: true, wantScore: 0.6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, w, _ := testDB(t)
+			at := w.TodayStartUTC.Add(time.Hour)
+			if tc.claude {
+				insertTokenUsage(t, db, at, "claude-test", "input", 100)
+				insertApiRequest(t, db, at, "claude-test")
+				if tc.observedZero {
+					insertCostUsage(t, db, at, "claude-test", 0)
+				}
+			}
+			if tc.codex {
+				insertCodexTokenUsage(t, db, at, "heatmap", "gpt-test", 100, 20, 0, 0)
+				if tc.observedZero {
+					seedNativeCost(t, db, at, "heatmap", "turn", "0")
+				}
+			}
+			weights := HeatmapWeights{Tokens: 0.4, Cost: 0.4, Requests: 0.2}
+			for _, pricingEnabled := range []bool{false, true} {
+				resp, err := BuildHeatmap(context.Background(), db, w, weights, ClientAll, pricingEnabled)
+				if err != nil {
+					t.Fatalf("BuildHeatmap: %v", err)
+				}
+				point, found := findPoint(resp.Points, at.In(w.Loc).Format(time.DateOnly))
+				if !found || point.Tokens == 0 || point.Requests == 0 || point.Cost != 0 || !approx(point.Score, tc.wantScore) {
+					t.Errorf("pricing_enabled=%v: point=%+v, want score=%v", pricingEnabled, point, tc.wantScore)
+				}
+			}
+		})
+	}
+}
+
 func TestHandler_Heatmap_Route(t *testing.T) {
 	db, _, _ := testDB(t)
 	insertTokenUsage(t, db, time.Now().UTC(), "claude-opus-4-1", "input", 10)

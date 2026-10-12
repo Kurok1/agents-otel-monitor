@@ -5,7 +5,39 @@
 
 package pricing
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
+
+func TestCacheWriteRateAndSubsetAccounting(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rate *float64
+		want float64
+	}{
+		{"fallback", nil, 0.0001},
+		{"dedicated", ptr(1.5e-6), 0.00015},
+		{"free", ptr(0), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := ModelPrice{InputCostPerToken: ptr(1e-6), OutputCostPerToken: ptr(2e-6), CacheReadInputTokenCost: ptr(0.25e-6), CacheCreationInputTokenCost: tc.rate}
+			c := TokenCounts{Input: 1000, Cached: 200, CacheWrite: 100, Output: 500, Reasoning: 100}
+			b, ok := p.CostBreakdown(c)
+			if !ok || !b.CacheWriteAvailable || math.Abs(b.Input-0.0007) > 1e-12 || math.Abs(b.CacheWrite-tc.want) > 1e-12 {
+				t.Fatalf("cache write breakdown: %+v, complete=%v", b, ok)
+			}
+			total, ok := p.cost(c)
+			if !ok || math.Abs(total-(0.0007+0.00005+0.001+tc.want)) > 1e-12 {
+				t.Fatalf("cache write counted more than once: %v", total)
+			}
+		})
+	}
+	table, err := parseLiteLLM([]byte(`{"model":{"cache_creation_input_token_cost":0.000003}}`))
+	if err != nil || table["model"].CacheCreationInputTokenCost == nil || *table["model"].CacheCreationInputTokenCost != 0.000003 {
+		t.Fatalf("parse cache creation rate: %+v, %v", table, err)
+	}
+}
 
 func ptr(f float64) *float64 { return &f }
 

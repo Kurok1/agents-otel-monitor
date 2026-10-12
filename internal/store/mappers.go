@@ -463,6 +463,9 @@ type tableSpec struct {
 }
 
 var allTables = []tableSpec{
+	{"codex_metric_turn_token_usage", mapCodexTurnTokenUsage},
+	{"codex_event_skill_invocation", mapCodexSkillInvocation},
+	{"codex_event_turn_cost", mapCodexTurnCost},
 	{"metric_session_count", mapSessionCount},
 	{"metric_lines_of_code_count", mapLinesOfCode},
 	{"metric_pull_request_count", mapPullRequest},
@@ -496,6 +499,12 @@ var allTables = []tableSpec{
 // unknown types (should never happen given dispatcher → Sink coupling).
 func tableNameFor(row any) (string, bool) {
 	switch row.(type) {
+	case otlp.CodexMetricTurnTokenUsageRow:
+		return "codex_metric_turn_token_usage", true
+	case otlp.CodexEventSkillInvocationRow:
+		return "codex_event_skill_invocation", true
+	case otlp.CodexEventTurnCostRow:
+		return "codex_event_turn_cost", true
 	case otlp.MetricSessionCountRow:
 		return "metric_session_count", true
 	case otlp.MetricLinesOfCodeCountRow:

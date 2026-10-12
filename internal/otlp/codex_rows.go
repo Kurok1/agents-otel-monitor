@@ -81,6 +81,10 @@ type CodexEventTokenUsageRow struct {
 	ModelReasoningEffort sql.NullString
 	DurationMs           sql.NullInt64
 	CostUsd              sql.NullFloat64 // estimated at ingest by internal/pricing; NULL when unpriced/disabled
+	TTFTMs               sql.NullInt64
+	CacheWriteTokenCount sql.NullInt64
+	Error                sql.NullString
+	UsageValid           bool
 }
 
 type CodexEventUserPromptRow struct {
@@ -110,4 +114,32 @@ type CodexEventToolResultRow struct {
 	MCPServerOrigin sql.NullString
 	ArgumentsLength sql.NullInt64
 	OutputLength    sql.NullInt64
+	OutputTruncated sql.NullBool
+}
+
+type CodexEventSkillInvocationRow struct {
+	CodexCommonAttrs
+	TurnID         sql.NullString
+	SkillName      sql.NullString
+	Scope          sql.NullString
+	PluginID       sql.NullString
+	InvocationType sql.NullString
+}
+
+type CodexEventTurnCostRow struct {
+	CodexCommonAttrs
+	TurnID          sql.NullString
+	EstimatedUSD    sql.NullString // preserve the decimal wire value, never float-round at ingest
+	Interrupted     sql.NullBool
+	Speed           sql.NullString
+	ReasoningEffort sql.NullString
+}
+
+type CodexMetricTurnTokenUsageRow struct {
+	CodexCommonAttrs
+	StartTimestamp time.Time
+	SampleCount    int64
+	SumTokens      float64
+	TokenType      sql.NullString
+	SessionSource  sql.NullString
 }

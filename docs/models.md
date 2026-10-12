@@ -1,11 +1,11 @@
 # Harness Telemetry DuckDB 数据模型
 
-每个已纳入的指标 / 事件单独建一张窄表，共 **27 张表**。表族保留各 harness 的原生语义，跨 harness 归一化只发生在查询层：
+每个已纳入的指标 / 事件单独建一张窄表，共 **30 张原始表**。表族保留各 harness 的原生语义，跨 harness 归一化只发生在查询层：
 
 | Harness | Metric 表 | Event 表 | 命名 |
 |---|---:|---:|---|
 | Claude Code | 8 | 11 | 历史无 harness 前缀：`metric_*` / `event_*` |
-| OpenAI Codex CLI | 2 | 6 | `codex_metric_*` / `codex_event_*`，见 §7 |
+| OpenAI Codex CLI | 3 | 8 | `codex_metric_*` / `codex_event_*`，见 §7 |
 
 设计原则：
 1. **一指标 / 一事件 = 一张表**，避免大宽表 schema 漂移
@@ -592,7 +592,7 @@ Codex 表族主要靠 `conversation_id` 组织会话，`call_id` 串联 tool_dec
 
 ### 5.6 数据保留
 
-启用 `archive.enabled` 后，服务在启动后后台补偿，并在 `dashboard.timezone` 的每天 03:00 处理过期的原始遥测。归档要求该时区在前后季节性区间内始终使用整小时 UTC 偏移；包含半小时或四十五分钟偏移的时区需保持归档关闭。保留边界是本地今日零点前 30 个日历日，并额外保证原始行至少存活 30 × 24 小时。每个过期本地日独立事务：先累加写入 `archive` schema 的摘要，再删除该日所有 27 张原始表的行；失败会回滚整日。
+启用 `archive.enabled` 后，服务在启动后后台补偿，并在 `dashboard.timezone` 的每天 03:00 处理过期的原始遥测。归档要求该时区在前后季节性区间内始终使用整小时 UTC 偏移；包含半小时或四十五分钟偏移的时区需保持归档关闭。保留边界是本地今日零点前 30 个日历日，并额外保证原始行至少存活 30 × 24 小时。每个过期本地日独立事务：先累加写入 `archive` schema 的摘要，再删除该日所有 30 张原始表的行；失败会回滚整日。
 
 归档只保存 Dashboard 所需的时间、模型、工具、Skill 与数值汇总，不保存 identity、`attrs`、prompt、工具参数/输出或错误原文。`archive.maintenance_state` 仅记录维护状态，不是 watermark；迟到的过期行会在下一轮按原始日期一并归档。
 
@@ -606,11 +606,11 @@ Codex 表族主要靠 `conversation_id` 组织会话，`call_id` 串联 tool_dec
 
 | 维度 | Claude Code | Codex CLI |
 |---|---|---|
-| Token | `SUM(value)` from `metric_token_usage` | `SUM(input_token_count + output_token_count)` from `codex_event_token_usage` |
-| 费用 | `SUM(value)` from `metric_cost_usage` | `SUM(cost_usd)` from `codex_event_token_usage`（可选估算） |
-| 请求 | `COUNT(*)` from `event_api_request` | `COUNT(*)` from `codex_event_token_usage`（completed 粒度） |
+| Token | `SUM(value)` from `metric_token_usage` | `SUM(input_token_count + output_token_count)` from `codex_valid_token_usage` |
+| 费用 | `SUM(value)` from `metric_cost_usage` | `SUM(cost_usd)` from `codex_selected_costs`（原生/本地/legacy 估算） |
+| 请求 | `COUNT(*)` from `event_api_request` | `COUNT(*)` from `codex_valid_token_usage`（completed 粒度） |
 
-固定取最近 360 个本地日（含今日），逐日补零。每天的综合强度 `score ∈ [0,1]` 在 Go 侧计算：各指标按 360 天窗口内最大值归一化（min 固定为 0），再用 `config.yaml` 的 `dashboard.heatmap` 权重加权后除以权重和。Codex-only 且未启用 pricing 时不把费用权重计入分母。前端按分位数把 `score` 分成 5 档着色。
+固定取最近 360 个本地日（含今日），逐日补零。每天的综合强度 `score ∈ [0,1]` 在 Go 侧计算：各指标按 360 天窗口内最大值归一化（min 固定为 0），再用 `config.yaml` 的 `dashboard.heatmap` 权重加权后除以权重和。Codex-only 与综合视图在查询范围没有可用成本时不计入费用权重；有效零成本保留权重，不按当前 pricing 开关判断。前端按分位数把 `score` 分成 5 档着色。
 
 > 注意：启用归档后，Dashboard 查询会联合原始表与 `archive` schema 的摘要，以保持 360 天热点图和其他历史视图连续。
 
@@ -633,9 +633,9 @@ Codex 表族主要靠 `conversation_id` 组织会话，`call_id` 串联 tool_dec
 
 ---
 
-## 7. OpenAI Codex CLI 表族（8 张）
+## 7. OpenAI Codex CLI 表族（11 张）
 
-来自 OpenAI Codex CLI 的 OTEL Logs 与选定 Metrics（协议见 [`protocol.md`](./protocol.md) §3），DDL 在 `internal/store/migrations/003_codex_event_tables.sql`、`005_codex_skill_metrics.sql`、`006_codex_response_tbt_metric.sql`。
+来自 OpenAI Codex CLI 的 OTEL Logs 与选定 Metrics（协议见 [`protocol.md`](./protocol.md) §3），DDL 在 `internal/store/migrations/003_codex_event_tables.sql`、`005_codex_skill_metrics.sql`、`006_codex_response_tbt_metric.sql`、`008_codex_telemetry.sql`。
 
 ### 7.1 公共列（codex 表族）
 
@@ -656,7 +656,7 @@ Codex 表族主要靠 `conversation_id` 组织会话，`call_id` 串联 tool_dec
 
 **与 Claude 表族的关键差异**：无 `user_id NOT NULL` 约束（Codex 身份字段天然可空），统一身份在查询层做 `COALESCE(user_account_id, user_email, 'unknown')`。
 
-Metric 表额外包含 `start_ts`；Codex Metrics 当前不保证携带 `conversation.id`，因此会话级 Skill / 速度不做推断关联。
+Metric 表额外包含 `start_ts`；Codex Metrics 当前不保证携带 `conversation.id`，因此不与会话推断关联。会话 Skill 来自带稳定 ID 的调用事件。
 
 ### 7.2 Metric 表
 
@@ -664,8 +664,9 @@ Metric 表额外包含 `start_ts`；Codex Metrics 当前不保证携带 `convers
 |---|---|
 | `codex_metric_skill_injected` | `start_ts`、`value` BIGINT、`skill`、`status`、`invoke_type`、`session_source` |
 | `codex_metric_response_tbt` | `start_ts`、`sample_count` BIGINT、`sum_ms` DOUBLE、`session_source` |
+| `codex_metric_turn_token_usage` | `start_ts`、`sample_count` BIGINT、`sum_tokens` DOUBLE、`token_type` VARCHAR NOT NULL、`session_source` |
 
-TBT 表不保存 Histogram 的 explicit bounds / bucket counts。一个 OTLP HistogramDataPoint 恒落一行，查询只按时间与模型聚合 `SUM(sample_count)` / `SUM(sum_ms)`，避免按 token 或 bucket 放大存储量。
+TBT 与 Turn token 表不保存 Histogram 的 explicit bounds / bucket counts。一个 OTLP HistogramDataPoint 恒落一行，查询只按时间与模型聚合 `SUM(sample_count)` / `SUM(sum_ms)`，避免按 token 或 bucket 放大存储量。
 
 ### 7.3 Event 表特有列
 
@@ -673,10 +674,12 @@ TBT 表不保存 Histogram 的 explicit bounds / bucket counts。一个 OTLP His
 |---|---|
 | `codex_event_conversation_starts` | `provider_name`、`reasoning_effort`、`reasoning_summary`、`context_window` BIGINT、`auto_compact_token_limit` BIGINT、`approval_policy`、`sandbox_policy`、`mcp_servers` |
 | `codex_event_api_request` | `duration_ms` BIGINT、`status_code` INTEGER、`error`、`attempt` BIGINT、`endpoint` |
-| `codex_event_token_usage` | `input_token_count` / `output_token_count` / `cached_token_count` / `reasoning_token_count` / `tool_token_count` BIGINT、`service_tier`、`model_reasoning_effort`、`duration_ms` BIGINT、`cost_usd` DOUBLE（v2.4.0；ingest 时由 `internal/pricing` 按 LiteLLM 计价表估算，未匹配/计价关闭时为 NULL） |
+| `codex_event_token_usage` | `input_token_count` / `output_token_count` / `cached_token_count` / `reasoning_token_count` / `tool_token_count` BIGINT、`service_tier`、`model_reasoning_effort`、`duration_ms` BIGINT、`cost_usd` DOUBLE（v2.4.0；ingest 时由 `internal/pricing` 按 LiteLLM 计价表估算，未匹配/计价关闭时为 NULL）；迁移 008 在其后追加 `ttft_ms` BIGINT、`cache_write_token_count` BIGINT、`error` VARCHAR、`usage_valid` BOOLEAN |
 | `codex_event_user_prompt` | `prompt_length` INTEGER、`prompt`（默认 `[REDACTED]`） |
 | `codex_event_tool_decision` | `tool_name`、`call_id`、`decision`（Codex 原始枚举）、`source` |
-| `codex_event_tool_result` | `tool_name`、`call_id`、`duration_ms` BIGINT、`success` BOOLEAN、`mcp_server`、`mcp_server_origin`、`arguments_length` / `output_length` BIGINT |
+| `codex_event_tool_result` | `tool_name`、`call_id`、`duration_ms` BIGINT、`success` BOOLEAN、`mcp_server`、`mcp_server_origin`、`arguments_length` / `output_length` BIGINT、`output_truncated` BOOLEAN（可空；长度只指预览） |
+| `codex_event_skill_invocation` | `turn_id` / `skill_name` / `invocation_type` VARCHAR NOT NULL；`scope` / `plugin_id` VARCHAR 可空 |
+| `codex_event_turn_cost` | `turn_id` / `estimated_usd` VARCHAR NOT NULL；`interrupted` BOOLEAN、`speed` / `reasoning_effort` VARCHAR 可空 |
 
 ### 7.4 写入要点
 
@@ -685,13 +688,18 @@ TBT 表不保存 Histogram 的 explicit bounds / bucket counts。一个 OTLP His
 - `codex.sse_event` 仅 `event.kind = response.completed` 写入 `codex_event_token_usage`，其余 kind 由 dispatcher 计入 skipped，不持久化
 - `codex_event_tool_result` 的 `arguments` / `output` 原文在解析层即丢弃（只算字节长度），**不落任何列也不落 `attrs`**——Codex 默认不脱敏且无客户端开关，这是接收端的隐私红线
 - token 统计口径为子集式（`cached ⊂ input`、`reasoning ⊂ output`），与 Claude 并列式不同：Codex 总量 = `input_token_count + output_token_count`，不可再加 cached
-- Codex 不上报成本；`cost_usd` 由 `internal/pricing` 在 ingest 时按 LiteLLM 计价表**估算**后落列（默认关闭，见 §配置 `pricing`）。Claude 仍用自报的权威 `cost_usd`（`metric_cost_usage`），不重算；两族表互不交叉
+- `codex_valid_token_usage` 只选成功且计数完整、非负、子集合法的完成记录；有效零计数保留。缺失用量与错误不能进入 token、请求数或本地计价。
+- 普通 input = input − cached − cache_write；总量仍为 input + output。
+- 原生 `estimated_usd` 保留十进制字符串，校验为 DECIMAL(38,18)；API 金额沿用浮点输出。`codex_native_turn_costs` 按 conversation+turn 选最新 ts/received_at，两者均相同时按 DECIMAL(38,18) 数值取较大金额，归档批内去重与冲突更新遵循相同规则；`codex_local_costs` 合并原始与归档的本地估算；`codex_selected_costs` 在全历史先按会话选择原生/本地，再由调用方过滤时间。两种估算独立保留，原生来源不由本地补齐。
+- Skill 去重视图 `codex_skill_invocations` 合并原始与归档，按 conversation+turn+skill+plugin+type 归并。
+- 迁移 008 从尚存原始行的 attrs 回填 TTFT、cache write、error、output_truncated，非法值保持 NULL；不重算历史 cost_usd。DDL 可重入，启动失败重试不会重复复制 legacy 成本。
+- Claude 继续使用自报成本，两族写入不交叉。
 
 ---
 
-## 8. Archive 摘要表（7 张）
+## 8. Archive 摘要表（14 张）
 
-迁移 `007_archive_tables.sql` 创建 `archive` schema；原始 27 张表及其写入协议不变。
+迁移 `007_archive_tables.sql` 创建 `archive` schema；008 新增 7 张 Codex 摘要表。归档与 BufferedWriter 共用写锁，每个日期的汇总和原始删除在同一事务内。
 
 | 表 | 主键 | 内容 |
 |---|---|---|
@@ -703,4 +711,17 @@ TBT 表不保存 Histogram 的 explicit bounds / bucket counts。一个 OTLP His
 | `archive.session_skills` | `client, session_id, skill_name` | Claude 会话内具名 Skill 激活数 |
 | `archive.maintenance_state` | `id = 1` | 最近成功 sweep 的 cutoff、完成时间及删除行数 |
 
-`usage_hourly` 的 `model` 为空时保存空字符串；所有计数值默认 0。Claude 总 token 来自 `metric_token_usage`，成本来自权威 `metric_cost_usage`，请求/速度来自 `event_api_request`。Codex 总 token 为 input + output，成本为写入时冻结的 `cost_usd`，速度来自有效的 TBT Histogram。会话活动只使用各 harness 已定义的 token、请求、工具、Skill、prompt 与 conversation-start 信号；没有会话 ID 的行不生成虚构会话。
+`usage_hourly` 的 `model` 为空时保存空字符串；所有计数值默认 0。Claude 总 token 来自 `metric_token_usage`，成本来自权威 `metric_cost_usage`，请求/速度来自 `event_api_request`。Codex 总 token 为有效 input + output，cache_creation_tokens 保存缓存写入，速度来自有效 TBT Histogram。008 之后新归档的 Codex cost 不再累加到 usage_hourly/sessions.cost_usd，而写入下面的独立成本表；sessions 另增 cache_write_tokens。usage_hourly 另存 cached_input_samples、cache_write_input_samples、reasoning_output_samples，确保对账中的缺失字段仍为未知，真实零值仍有样本证据。会话活动只使用各 harness 已定义的 token、请求、工具、Skill、prompt 与 conversation-start 信号；没有会话 ID 的行不生成虚构会话。
+
+
+| 新表 | 主键 | 内容 |
+|---|---|---|
+| `archive.codex_local_cost_hourly` | bucket_start, conversation_id, model | 冻结本地成本和可定价样本数；NULL 与有效零分开 |
+| `archive.codex_turn_cost` | conversation_id, turn_id | 最新事件时间、接收时间、model、十进制原生金额 |
+| `archive.codex_skill_invocation` | conversation_id, turn_id, skill_name, plugin_id, invocation_type | 首次时间、scope，支持跨原始/归档去重 |
+| `archive.codex_ttft_histogram` | bucket_start, conversation_id, model, ttft_ms | 整毫秒频次，合并后精确计算 nearest-rank 分位数 |
+| `archive.codex_turn_usage_hourly` | bucket_start, model, token_type, session_source | Histogram count/sum |
+| `archive.codex_legacy_cost_hourly` | bucket_start, model | 升级时复制的旧聚合成本，无法恢复会话选源关系 |
+| `archive.codex_legacy_session_cost` | conversation_id | 升级时复制的旧会话成本；只在会话查询使用，避免与小时表双计 |
+
+原生 turn 和 Skill invocation 的最小逻辑 ID 必须保留，用于跨归档去重和迟到选源；仍不保留身份字段、attrs 或内容原文。TTFT 频次合并后与原始结果一致，不能对各桶分位数求平均。旧版已归档的新增字段无法恢复；其成本明确标记 legacy，不能声称覆盖完整。新归档本地成本携带会话，后续迟到原生值可改变历史窗口选源。

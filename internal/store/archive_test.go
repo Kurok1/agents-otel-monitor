@@ -57,8 +57,13 @@ func TestArchiverArchivesExpiredDataAndRetainsBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query Codex usage archive: %v", err)
 	}
-	if codexTokens != 100 || codexInput != 80 || codexOutput != 20 || codexCached != 30 || codexReasoning != 5 || throughput != 50 || codexRows != 1 || codexRequests != 1 || codexCost != 0.5 || codexSpeedUnits != 2 || codexSpeedDuration != 40 {
+	if codexTokens != 100 || codexInput != 80 || codexOutput != 20 || codexCached != 30 || codexReasoning != 5 || throughput != 50 || codexRows != 1 || codexRequests != 1 || codexCost != 0 || codexSpeedUnits != 2 || codexSpeedDuration != 40 {
 		t.Fatalf("unexpected Codex archive: tokens=%d input=%d output=%d cached=%d reasoning=%d throughput=%d rows=%d requests=%d cost=%g speed=%g/%g", codexTokens, codexInput, codexOutput, codexCached, codexReasoning, throughput, codexRows, codexRequests, codexCost, codexSpeedUnits, codexSpeedDuration)
+	}
+
+	var selectedCost float64
+	if err := db.SQL.QueryRow(`SELECT SUM(cost_usd) FROM archive.codex_local_cost_hourly`).Scan(&selectedCost); err != nil || selectedCost != 0.5 {
+		t.Fatalf("archived local cost = %v, %v", selectedCost, err)
 	}
 
 	assertArchiveCount(t, db.SQL, "archive.tool_hourly", 2)
