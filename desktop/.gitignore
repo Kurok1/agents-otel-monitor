@@ -1,4 +1,5 @@
 dist/
+release-artifacts/
 node_modules/
 src-tauri/target/
 src-tauri/gen/

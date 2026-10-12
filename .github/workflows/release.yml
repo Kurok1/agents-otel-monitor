@@ -134,9 +134,16 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  desktop-macos:
+    name: Build macOS desktop
+    needs: validate-version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/desktop-macos.yml
+
   release:
     name: Publish release
-    needs: build
+    needs: [build, desktop-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -144,11 +151,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          # Filter to binary build artifacts only. Without a pattern, this
+          # Filter to server and desktop artifacts only. Without a pattern, this
           # step also pulls the docker-digests-* artifacts (0-byte hex-named
           # files used by the docker-manifest job) and their unzip fails the
           # whole release step.
-          pattern: '{linux,darwin}-*'
+          pattern: '{linux,darwin,desktop}-*'
           merge-multiple: true
 
       - name: Aggregate checksums
@@ -163,6 +170,8 @@ jobs:
         with:
           files: |
             dist/*.tar.gz
+            dist/*.dmg
+            dist/*.app.zip
             dist/checksums.txt
           generate_release_notes: true
           draft: false

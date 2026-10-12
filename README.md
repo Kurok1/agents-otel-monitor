@@ -64,7 +64,7 @@ go build -o bin/server ./cmd/server
 
 脚本内部依次：`npm install && npm run build`（产物写入 `internal/web/dist/`）→ 读取根目录 `VERSION` → 通过 linker flag 注入版本并执行 `go build`（用 `//go:embed` 嵌入 dist）。直接执行普通 `go build` 时版本仍为 `dev`。
 
-仅 macOS 的菜单栏看板位于独立的 [`desktop/`](desktop/README.md) 项目中：
+仅 macOS 的菜单栏看板位于独立的 [`desktop/`](desktop/README.md) 项目中。启用桌面端发布流程的 Release 提供 Apple Silicon（arm64）的 `agents-otel-monitor-desktop_<tag>_darwin-arm64.dmg` 和 `.app.zip`，需要连接已运行的监控服务。首次打开与手动打包说明见 [桌面端文档](desktop/README.md#github-打包与发布)。本地构建：
 
 ```bash
 cd desktop
