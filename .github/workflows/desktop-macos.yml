@@ -1,0 +1,71 @@
+# @author Kurok1 <im.kurokyhanc@gmail.com>
+# @since 3.3.0
+
+name: macOS Desktop
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-macos.yml'
+      - '.github/workflows/release.yml'
+      - 'desktop/**'
+      - 'VERSION'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Apple Silicon desktop
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      - name: Install and check desktop
+        run: |
+          npm ci
+          npm run version:check
+          npm run lint
+          npm test
+
+      - name: Build app and DMG
+        env:
+          # No Apple Developer certificate is required for ad-hoc signing.
+          APPLE_SIGNING_IDENTITY: '-'
+        run: npm run desktop:build -- --target aarch64-apple-darwin --bundles app,dmg --ci -- --locked
+
+      - name: Test native layer
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Verify and package desktop
+        run: bash scripts/package-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-darwin-arm64
+          path: |
+            desktop/release-artifacts/*.dmg
+            desktop/release-artifacts/*.app.zip
+            desktop/release-artifacts/*.sha256
+          if-no-files-found: error
+          retention-days: 7
