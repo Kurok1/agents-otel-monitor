@@ -31,14 +31,14 @@ const archiveCodexTurnCostSQL = `
 INSERT INTO archive.codex_turn_cost
 SELECT conversation_id, turn_id, ts, received_at, model, estimated_usd
 FROM codex_event_turn_cost WHERE ts >= ? AND ts < ?
-QUALIFY row_number() OVER (PARTITION BY conversation_id, turn_id ORDER BY ts DESC, received_at DESC, estimated_usd DESC) = 1
+QUALIFY row_number() OVER (PARTITION BY conversation_id, turn_id ORDER BY ts DESC, received_at DESC, CAST(estimated_usd AS DECIMAL(38,18)) DESC) = 1
 ON CONFLICT (conversation_id, turn_id) DO UPDATE SET
     ts = excluded.ts, received_at = excluded.received_at,
     model = excluded.model, estimated_usd = excluded.estimated_usd
 WHERE excluded.ts > archive.codex_turn_cost.ts
    OR (excluded.ts = archive.codex_turn_cost.ts AND excluded.received_at > archive.codex_turn_cost.received_at)
    OR (excluded.ts = archive.codex_turn_cost.ts AND excluded.received_at = archive.codex_turn_cost.received_at
-       AND excluded.estimated_usd > archive.codex_turn_cost.estimated_usd)`
+       AND CAST(excluded.estimated_usd AS DECIMAL(38,18)) > CAST(archive.codex_turn_cost.estimated_usd AS DECIMAL(38,18)))`
 
 const archiveCodexSkillsSQL = `
 INSERT INTO archive.codex_skill_invocation

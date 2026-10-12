@@ -459,7 +459,7 @@ Turn 对账按原始模型与 `total/input/cached_input/cache_write_input/output
 - Codex 普通输入 = input − cached − cache_write；缓存命中率 = cached / input。
 - 本地计价：普通输入、缓存读、缓存写分别计价；缓存写使用 LiteLLM `cache_creation_input_token_cost`，缺失时退回普通输入价。显式零价保留。reasoning 只在 output 内拆分。
 
-成本同时保留两个估算来源：原生 `codex.turn_cost` 与写入时冻结的本地 LiteLLM `cost_usd`。原生金额按字符串保存，并通过 DECIMAL 校验；相同 conversation+turn 选择最新事件（再按 received_at 排序），有效零金额不能当作缺失。
+成本同时保留两个估算来源：原生 `codex.turn_cost` 与写入时冻结的本地 LiteLLM `cost_usd`。原生金额按字符串保存，并通过 DECIMAL 校验；相同 conversation+turn 选择最新事件（再按 received_at 排序），两个时间均相同时按 DECIMAL(38,18) 数值取较大金额，原始查询与归档使用相同规则。有效零金额不能当作缺失。
 
 **先跨全历史按会话选择来源，再过滤查询时间窗口**：会话一旦有原生成本，就只用已观测到的原生成本；否则用本地估算。不用本地值补齐原生回合，覆盖率始终未知。原生金额归属其事件时间；迟到原生事件可能改变以前窗口的选源。未接入 `codex.turn.cost` Metric，以免与日志重复计费。
 

@@ -610,7 +610,7 @@ Codex 表族主要靠 `conversation_id` 组织会话，`call_id` 串联 tool_dec
 | 费用 | `SUM(value)` from `metric_cost_usage` | `SUM(cost_usd)` from `codex_selected_costs`（原生/本地/legacy 估算） |
 | 请求 | `COUNT(*)` from `event_api_request` | `COUNT(*)` from `codex_valid_token_usage`（completed 粒度） |
 
-固定取最近 360 个本地日（含今日），逐日补零。每天的综合强度 `score ∈ [0,1]` 在 Go 侧计算：各指标按 360 天窗口内最大值归一化（min 固定为 0），再用 `config.yaml` 的 `dashboard.heatmap` 权重加权后除以权重和。Codex-only 且查询范围没有可用成本时不把费用权重计入分母；不按当前 pricing 开关判断。前端按分位数把 `score` 分成 5 档着色。
+固定取最近 360 个本地日（含今日），逐日补零。每天的综合强度 `score ∈ [0,1]` 在 Go 侧计算：各指标按 360 天窗口内最大值归一化（min 固定为 0），再用 `config.yaml` 的 `dashboard.heatmap` 权重加权后除以权重和。Codex-only 与综合视图在查询范围没有可用成本时不计入费用权重；有效零成本保留权重，不按当前 pricing 开关判断。前端按分位数把 `score` 分成 5 档着色。
 
 > 注意：启用归档后，Dashboard 查询会联合原始表与 `archive` schema 的摘要，以保持 360 天热点图和其他历史视图连续。
 
@@ -690,7 +690,7 @@ TBT 与 Turn token 表不保存 Histogram 的 explicit bounds / bucket counts。
 - token 统计口径为子集式（`cached ⊂ input`、`reasoning ⊂ output`），与 Claude 并列式不同：Codex 总量 = `input_token_count + output_token_count`，不可再加 cached
 - `codex_valid_token_usage` 只选成功且计数完整、非负、子集合法的完成记录；有效零计数保留。缺失用量与错误不能进入 token、请求数或本地计价。
 - 普通 input = input − cached − cache_write；总量仍为 input + output。
-- 原生 `estimated_usd` 保留十进制字符串，校验为 DECIMAL(38,18)；API 金额沿用浮点输出。`codex_native_turn_costs` 按 conversation+turn 选最新 ts/received_at；`codex_local_costs` 合并原始与归档的本地估算；`codex_selected_costs` 在全历史先按会话选择原生/本地，再由调用方过滤时间。两种估算独立保留，原生来源不由本地补齐。
+- 原生 `estimated_usd` 保留十进制字符串，校验为 DECIMAL(38,18)；API 金额沿用浮点输出。`codex_native_turn_costs` 按 conversation+turn 选最新 ts/received_at，两者均相同时按 DECIMAL(38,18) 数值取较大金额，归档批内去重与冲突更新遵循相同规则；`codex_local_costs` 合并原始与归档的本地估算；`codex_selected_costs` 在全历史先按会话选择原生/本地，再由调用方过滤时间。两种估算独立保留，原生来源不由本地补齐。
 - Skill 去重视图 `codex_skill_invocations` 合并原始与归档，按 conversation+turn+skill+plugin+type 归并。
 - 迁移 008 从尚存原始行的 attrs 回填 TTFT、cache write、error、output_truncated，非法值保持 NULL；不重算历史 cost_usd。DDL 可重入，启动失败重试不会重复复制 legacy 成本。
 - Claude 继续使用自报成本，两族写入不交叉。

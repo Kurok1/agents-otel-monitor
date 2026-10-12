@@ -256,30 +256,58 @@ func TestCodexOptionalUsageMissingStaysUnknownAfterArchive(t *testing.T) {
 }
 
 func TestCodexNativeCostTieBreakSurvivesArchiveReplay(t *testing.T) {
-	db := openArchiveTestDB(t)
-	ctx := context.Background()
-	old := archiveCutoffForTest(t, archiveTestNow).Add(-time.Hour)
-	seed := func(amount string) {
-		t.Helper()
-		execArchiveFixture(t, db.SQL, `INSERT INTO codex_event_turn_cost (ts,received_at,conversation_id,turn_id,model,estimated_usd) VALUES (?,?,'tie','turn','gpt-test',?)`, old, old, amount)
-	}
-	archiver, err := store.NewArchiver(db, archiveTestTimezone, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	seed("2")
-	if _, err := archiver.RunOnce(ctx, archiveTestNow); err != nil {
-		t.Fatal(err)
-	}
-	seed("1")
-	for step := 0; step < 2; step++ {
-		cost, err := queryCodexCost(ctx, db.SQL, codexCostFilter{})
-		if err != nil || cost.Total != 2 || cost.NativeTurnCount != 1 {
-			t.Fatalf("tie replay step %d: %+v %v", step, cost, err)
-		}
-		if _, err := archiver.RunOnce(ctx, archiveTestNow); err != nil {
-			t.Fatal(err)
-		}
+	for _, tc := range []struct {
+		name, lower, higher string
+	}{
+		{"different digit counts", "9", "10"},
+		{"leading zeros", "9", "010"},
+		{"decimal precision", "9.000000000000000001", "9.000000000000000002"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openArchiveTestDB(t)
+			ctx := context.Background()
+			old := archiveCutoffForTest(t, archiveTestNow).Add(-time.Hour)
+			seed := func(amount string) {
+				t.Helper()
+				execArchiveFixture(t, db.SQL, `INSERT INTO codex_event_turn_cost (ts,received_at,conversation_id,turn_id,model,estimated_usd) VALUES (?,?,'tie','turn','gpt-test',?)`, old, old, amount)
+			}
+			archiver, err := store.NewArchiver(db, archiveTestTimezone, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			archive := func() {
+				t.Helper()
+				if _, err := archiver.RunOnce(ctx, archiveTestNow); err != nil {
+					t.Fatal(err)
+				}
+			}
+			check := func(phase string) {
+				t.Helper()
+				// Compare in DECIMAL so a DOUBLE tie-break cannot hide a loss
+				// of precision below the API's floating-point representation.
+				var amount string
+				var equal bool
+				err := db.SQL.QueryRow(`SELECT CAST(cost_usd AS VARCHAR), cost_usd = CAST(? AS DECIMAL(38,18)) FROM codex_native_turn_costs`, tc.higher).Scan(&amount, &equal)
+				if err != nil || !equal {
+					t.Errorf("%s: cost=%q, want %s: %v", phase, amount, tc.higher, err)
+				}
+				cost, err := queryCodexCost(ctx, db.SQL, codexCostFilter{})
+				if err != nil || cost.NativeTurnCount != 1 || cost.Source != "native" {
+					t.Errorf("%s: deduplicated cost=%+v: %v", phase, cost, err)
+				}
+			}
+			seed(tc.lower)
+			archive()
+			seed(tc.higher)
+			seed(tc.lower)
+			check("mixed raw and archive")
+			archive()
+			check("archived increase")
+			seed(tc.lower)
+			check("smaller replay")
+			archive()
+			check("archived replay")
+		})
 	}
 }
 

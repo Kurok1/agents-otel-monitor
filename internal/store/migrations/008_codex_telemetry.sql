@@ -169,7 +169,7 @@ FROM (
 ) native_cost
 WHERE NULLIF(conversation_id, '') IS NOT NULL AND NULLIF(turn_id, '') IS NOT NULL
   AND TRY_CAST(estimated_usd AS DECIMAL(38,18)) >= 0
-QUALIFY row_number() OVER (PARTITION BY conversation_id, turn_id ORDER BY ts DESC, received_at DESC, estimated_usd DESC) = 1;
+QUALIFY row_number() OVER (PARTITION BY conversation_id, turn_id ORDER BY ts DESC, received_at DESC, CAST(estimated_usd AS DECIMAL(38,18)) DESC) = 1;
 
 CREATE OR REPLACE VIEW codex_local_costs AS
 SELECT ts, conversation_id, model, cost_usd, CASE WHEN cost_usd IS NULL THEN 0 ELSE 1 END sample_count

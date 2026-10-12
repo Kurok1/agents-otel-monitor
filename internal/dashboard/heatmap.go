@@ -98,12 +98,13 @@ func BuildHeatmap(ctx context.Context, db *sql.DB, w TimeWindow, weights Heatmap
 		d = d.AddDate(0, 0, 1)
 	}
 
-	// Unknown Codex cost contributes no weight. Native estimates and stored
-	// local estimates stay available independently of today's pricing switch.
-	wsum := weights.Tokens + weights.Cost + weights.Requests
-	if client == ClientCodex && !data.costAvailable {
-		wsum = weights.Tokens + weights.Requests
+	// Unavailable cost contributes no weight, including in the combined view.
+	// Observed zero and stored estimates stay available regardless of pricing.
+	costWeight := weights.Cost
+	if !data.costAvailable {
+		costWeight = 0
 	}
+	wsum := weights.Tokens + costWeight + weights.Requests
 	for i := range points {
 		if wsum <= 0 {
 			break // validated > 0 at config load; defensive guard
@@ -111,7 +112,7 @@ func BuildHeatmap(ctx context.Context, db *sql.DB, w TimeWindow, weights Heatmap
 		nt := normFrac(float64(points[i].Tokens), float64(maxTok))
 		nc := normFrac(points[i].Cost, maxCost)
 		nr := normFrac(float64(points[i].Requests), float64(maxReq))
-		points[i].Score = (weights.Tokens*nt + weights.Cost*nc + weights.Requests*nr) / wsum
+		points[i].Score = (weights.Tokens*nt + costWeight*nc + weights.Requests*nr) / wsum
 	}
 
 	resp.Points = points
