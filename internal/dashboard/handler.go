@@ -28,7 +28,7 @@ type Handler struct {
 // NewHandler compiles the model-group classifier from cfg. The patterns
 // were already validated at config.Load, so an error here implies an
 // internal mismatch between validation and compilation paths. pricingEnabled
-// (from config.Pricing.Enabled) gates whether codex estimated cost is surfaced.
+// (from config.Pricing.Enabled) gates price-table features, not saved costs.
 func NewHandler(db *sql.DB, cfg config.DashboardConfig, pricingEnabled bool, log *slog.Logger) (*Handler, error) {
 	if log == nil {
 		log = slog.Default()
@@ -47,6 +47,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/api/usage/codex/telemetry":
+		h.handleCodexTelemetry(w, r)
 	case "/api/usage/snapshot":
 		h.handleSnapshot(w, r)
 	case "/api/usage/models":

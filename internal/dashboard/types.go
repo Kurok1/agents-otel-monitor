@@ -27,6 +27,7 @@ type TokensBlock struct {
 }
 
 type CostBlock struct {
+	CostMetadata
 	Total     float64   `json:"total"`
 	PrevTotal float64   `json:"prev_total"`
 	Sparkline []float64 `json:"sparkline"`
@@ -58,6 +59,9 @@ type CacheBlock struct {
 // group (e.g. "opus-4.7", "sonnet-4.6", "deepseek-v3"). Order in the
 // response is by total tokens descending so the busiest group sorts first.
 type ModelBlock struct {
+	CostAvailable          bool     `json:"cost_available"`
+	CacheWriteTokens       int64    `json:"cache_write_tokens"`
+	CacheWriteCost         *float64 `json:"cache_write_cost"`
 	Group                  string   `json:"group"`
 	Requests               int64    `json:"requests"`
 	TokensIn               int64    `json:"tokens_in"`
@@ -78,6 +82,7 @@ type ModelBlock struct {
 // input + output tokens; cache counters do not participate in this compact
 // menu-bar view.
 type PeriodModelsResponse struct {
+	CostMetadata
 	UpdatedAt     string             `json:"updated_at"`
 	Range         string             `json:"range"`
 	Client        Client             `json:"client"`
@@ -126,6 +131,8 @@ type ToolRank struct {
 }
 
 type SkillRank struct {
+	Explicit    int64  `json:"explicit"`
+	Implicit    int64  `json:"implicit"`
 	Name        string `json:"name"`
 	Activations int64  `json:"activations"`
 }
@@ -172,6 +179,7 @@ type HeatmapPoint struct {
 // SessionSummary is one row of the session list. Times are RFC3339 UTC
 // (frontend formats to local). Counts are all-time for that session.
 type SessionSummary struct {
+	CostMetadata
 	SessionID        string `json:"session_id"`
 	Client           string `json:"client"` // "claude" | "codex"
 	FirstActive      string `json:"first_active"`
@@ -198,6 +206,8 @@ type SessionListResponse struct {
 // aggregated "其他" tail (see bucketToolsTopN / bucketSkillsTopN). The
 // breakdown sums equal ToolCalls / SkillActivations respectively.
 type SessionDetailResponse struct {
+	CostMetadata
+	SkillSource      string      `json:"skill_source,omitempty"`
 	SessionID        string      `json:"session_id"`
 	Client           string      `json:"client"` // "claude" | "codex"
 	FirstActive      string      `json:"first_active"`
@@ -220,10 +230,11 @@ type SessionDetailResponse struct {
 
 // SessionTokenDetail carries codex raw token dimensions for the detail page.
 type SessionTokenDetail struct {
-	Input     int64 `json:"input"`
-	Output    int64 `json:"output"`
-	Cached    int64 `json:"cached"`
-	Reasoning int64 `json:"reasoning"`
+	CacheWrite int64 `json:"cache_write"`
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	Cached     int64 `json:"cached"`
+	Reasoning  int64 `json:"reasoning"`
 }
 
 // RatesResponse → GET /api/usage/rates?range=&client=
@@ -294,6 +305,7 @@ type PricingModelsResponse struct {
 // Matched=false → the model was seen in data but has no price entry (all
 // four rates nil).
 type PricedModel struct {
+	CacheWritePer1M      *float64 `json:"cache_write_per_1m"`
 	Model                string   `json:"model"`
 	Clients              []string `json:"clients"` // "claude" / "codex", sorted
 	Matched              bool     `json:"matched"`
@@ -321,6 +333,7 @@ type PricingCatalogResponse struct {
 
 // CatalogPriceModel is one full-catalog row. Prices are USD per 1M tokens.
 type CatalogPriceModel struct {
+	CacheWritePer1M      *float64 `json:"cache_write_per_1m"`
 	Model                string   `json:"model"`
 	InputPer1M           *float64 `json:"input_per_1m"`
 	OutputPer1M          *float64 `json:"output_per_1m"`

@@ -29,9 +29,10 @@ func BuildHeatmap(ctx context.Context, db *sql.DB, w TimeWindow, weights Heatmap
 	start, end := w.HeatmapStartUTC, w.TodayEndUTC
 
 	type buckets struct {
-		tokens   []periodBucket
-		costs    []periodCostBucket
-		requests []periodBucket
+		tokens        []periodBucket
+		costs         []periodCostBucket
+		requests      []periodBucket
+		costAvailable bool
 	}
 	data, err := withDashboardSnapshot(ctx, db, func(q sqlQueryer) (buckets, error) {
 		tokens, err := QueryTokensSparkline(ctx, q, client, w, "day", start, end)
@@ -46,7 +47,11 @@ func BuildHeatmap(ctx context.Context, db *sql.DB, w TimeWindow, weights Heatmap
 		if err != nil {
 			return buckets{}, err
 		}
-		return buckets{tokens, costs, requests}, nil
+		meta, err := queryCostMetadata(ctx, q, client, codexCostFilter{Start: start, End: end})
+		if err != nil {
+			return buckets{}, err
+		}
+		return buckets{tokens, costs, requests, meta.Available}, nil
 	})
 	if err != nil {
 		return resp, err
@@ -93,12 +98,10 @@ func BuildHeatmap(ctx context.Context, db *sql.DB, w TimeWindow, weights Heatmap
 		d = d.AddDate(0, 0, 1)
 	}
 
-	// Codex cost is estimated and only present when pricing is enabled. When
-	// pricing is off, codex cost is always NULL/0, so drop the cost weight to
-	// avoid systematically depressing codex-only scores (stage-two behavior).
-	// When pricing is on, keep all three weights so codex matches all/claude.
+	// Unknown Codex cost contributes no weight. Native estimates and stored
+	// local estimates stay available independently of today's pricing switch.
 	wsum := weights.Tokens + weights.Cost + weights.Requests
-	if client == ClientCodex && !pricingEnabled {
+	if client == ClientCodex && !data.costAvailable {
 		wsum = weights.Tokens + weights.Requests
 	}
 	for i := range points {

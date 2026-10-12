@@ -40,6 +40,9 @@ var archiveRawTables = []string{
 	"event_skill_activated",
 	"event_at_mention",
 	"codex_metric_skill_injected",
+	"codex_metric_turn_token_usage",
+	"codex_event_skill_invocation",
+	"codex_event_turn_cost",
 	"codex_metric_response_tbt",
 	"codex_event_conversation_starts",
 	"codex_event_api_request",
@@ -380,6 +383,14 @@ func (a *Archiver) checkpoint(ctx context.Context) {
 }
 
 var archiveAggregationStatements = []string{
+	archiveCodexResponseSamplesSQL,
+	archiveCodexLocalCostSQL,
+	archiveCodexTurnCostSQL,
+	archiveCodexSkillsSQL,
+	archiveCodexTTFTSQL,
+	archiveCodexTurnUsageSQL,
+	archiveCodexSessionCacheSQL,
+	archiveCodexActivitySQL,
 	archiveUsageSQL,
 	archiveToolHourlySQL,
 	archiveSkillHourlySQL,
@@ -427,11 +438,11 @@ FROM (
     SELECT date_trunc('hour', ts), 'codex', COALESCE(model, ''),
            SUM(COALESCE(input_token_count, 0) + COALESCE(output_token_count, 0)),
            SUM(COALESCE(input_token_count, 0)), SUM(COALESCE(output_token_count, 0)),
-           SUM(COALESCE(cached_token_count, 0)), 0, SUM(COALESCE(reasoning_token_count, 0)),
-           SUM(GREATEST(COALESCE(input_token_count, 0) - COALESCE(cached_token_count, 0), 0)),
-           COUNT(*), COUNT(*), SUM(COALESCE(cost_usd, 0)), 0.0, 0.0,
+           SUM(COALESCE(cached_token_count, 0)), SUM(COALESCE(cache_write_token_count, 0)), SUM(COALESCE(reasoning_token_count, 0)),
+           SUM(GREATEST(COALESCE(input_token_count, 0) - COALESCE(cached_token_count, 0) - COALESCE(cache_write_token_count, 0), 0)),
+           COUNT(*), COUNT(*), 0.0, 0.0, 0.0,
            MAX(CASE WHEN NULLIF(model, '') IS NOT NULL THEN ts END)
-    FROM codex_event_token_usage WHERE ts >= ? AND ts < ? GROUP BY 1, 2, 3
+    FROM codex_valid_token_usage WHERE ts >= ? AND ts < ? GROUP BY 1, 2, 3
     UNION ALL
     SELECT date_trunc('hour', ts), 'codex', COALESCE(model, ''),
            0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0,
@@ -506,8 +517,8 @@ FROM (
     SELECT 'codex', conversation_id, ts,
            COALESCE(input_token_count, 0) + COALESCE(output_token_count, 0),
            COALESCE(input_token_count, 0), COALESCE(output_token_count, 0), COALESCE(cached_token_count, 0),
-           COALESCE(reasoning_token_count, 0), 1, 0, 0, COALESCE(cost_usd, 0)
-    FROM codex_event_token_usage WHERE ts >= ? AND ts < ? AND conversation_id IS NOT NULL
+           COALESCE(reasoning_token_count, 0), 1, 0, 0, 0.0
+    FROM codex_valid_token_usage WHERE ts >= ? AND ts < ? AND conversation_id IS NOT NULL
     UNION ALL
     SELECT 'claude', session_id, NULL, 0, 0, 0, 0, 0, 0, 0, 0, value
     FROM metric_cost_usage WHERE ts >= ? AND ts < ? AND session_id IS NOT NULL

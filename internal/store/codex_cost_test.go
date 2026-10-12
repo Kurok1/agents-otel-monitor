@@ -27,7 +27,7 @@ func TestMigration004AddsCostColumnLast(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load migrations: %v", err)
 	}
-	if err := RunMigrations(db.SQL, migs); err != nil {
+	if err := RunMigrations(db.SQL, migs[:4]); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
 

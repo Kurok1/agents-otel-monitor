@@ -10,13 +10,13 @@ This file provides repository guidance for coding agents working in this reposit
 
 - **领域主语**：harness；当前对等支持 Claude Code 与 OpenAI Codex CLI，术语边界见 `CONTEXT.md`
 - **输入**：各 harness 通过 **OTLP gRPC** 向同一个 4317 端口推送 Metrics / Events
-- **存储**：DuckDB 单文件，按 harness 协议维护独立表族，**一指标 / 一事件 = 一张表**，共 **27 张表**
+- **存储**：DuckDB 单文件，按 harness 协议维护独立表族，**一指标 / 一事件 = 一张表**，共 **30 张表**
 - **当前版本**：后端 ingest、查询 API 与 Web Dashboard 均已落地
 
 | Harness family | 信号 | 表族 |
 |---|---|---|
 | `claude` | 8 Metrics + 11 Events | 19 张历史无前缀表（`metric_*` / `event_*`） |
-| `codex` | 2 Metrics + 6 Events | 8 张 `codex_metric_*` / `codex_event_*` 表 |
+| `codex` | 3 Metrics + 8 Events | 11 张 `codex_metric_*` / `codex_event_*` 表 |
 
 仓库、发布归档和二进制使用 `agents-otel-monitor`；更新器兼容读取旧命名归档，统一安装为新文件名。Go module 与 `/version.service` 保留 `claude-code-monitor`，后者用于桌面端识别服务。变更发布物命名时同步更新打包脚本与更新器；模块与协议标识的迁移需单独明确范围。
 
@@ -30,7 +30,7 @@ This file provides repository guidance for coding agents working in this reposit
 |---|---|
 | `CONTEXT.md` | harness、harness family、harness telemetry 等领域词汇 |
 | `docs/protocol.md` | Claude / Codex 指标与事件的 OTLP 数据结构、字段约束、取值范围 |
-| `docs/models.md` | 27 张 DuckDB 表的完整 DDL + 公共列约定 + 写入要点 |
+| `docs/models.md` | 30 张 DuckDB 表的完整 DDL + 公共列约定 + 写入要点 |
 
 `docs/plan-*`、`docs/plans/` 与 `docs/superpowers/{plans,specs}/` 记录当时的设计和实施背景，可能包含旧仓库名或 Claude-only 阶段的事实；保留其历史语境。与当前行为冲突时，以 `CONTEXT.md`、`docs/protocol.md`、`docs/models.md` 和代码为准。
 
@@ -56,7 +56,7 @@ Claude Code                OpenAI Codex CLI
         ┌───────────┴───────────┐
         ▼                       ▼
  Claude parsers            Codex parsers       ← internal/otlp/{metrics,events,codex_events}.go
- → legacy table rows       → codex_* rows       （27 个强类型 row struct）
+ → legacy table rows       → codex_* rows       （30 个强类型 row struct）
         │                       │
         └───────────┬───────────┘
                     ▼
@@ -65,7 +65,7 @@ Claude Code                OpenAI Codex CLI
                     ▼
             [BufferedWriter]                    ← internal/store/writer.go
                     │
-       tableNameFor(row) → 27 个 TableBuffer
+       tableNameFor(row) → 30 个 TableBuffer
                     │
        触发：batch_size 行 或 flush_interval
                     ▼
@@ -121,9 +121,9 @@ duckdb ./data/monitor.duckdb "SELECT COUNT(*) FROM metric_token_usage;"
 ### 类型纪律
 
 - **避免 `any` / `interface{}`**：仅以下两处允许使用：
-  - 27 张表的 `attrs` 兜底列（`map[string]any`），用于未识别的 OTLP attribute
+  - 30 张表的 `attrs` 兜底列（`map[string]any`），用于未识别的 OTLP attribute
   - `Sink.AppendMetric(row any)` / `AppendEvent(row any)`：内部立刻 type-switch 到具体 row struct
-- **每张表对应一个 row struct**（共 27 个），字段名与列名一一对应；不用 `map[string]string` 代替
+- **每张表对应一个 row struct**（共 30 个），字段名与列名一一对应；不用 `map[string]string` 代替
 - **可空字段用 `sql.NullXxx`**，直接喂给 go-duckdb Appender，避免双层零值检查
 - 时间统一 `time.Time`（UTC），OTLP 纳秒值除 1000 转微秒精度
 
@@ -245,7 +245,7 @@ for _, row := range rows {
 |---|---|
 | 仅支持 gRPC，不支持 HTTP/protobuf | gRPC 已覆盖默认场景，stub 直接给 Export 签名，实现更简洁 |
 | YAML 单一配置源，不引入 koanf / viper | 单一来源够用，`yaml.v3` 直接 Unmarshal 即可 |
-| 一指标/事件一表（27 张窄表） | 避免大宽表 schema 漂移，详见 `docs/models.md` §1 |
+| 一指标/事件一表（30 张窄表） | 避免大宽表 schema 漂移，详见 `docs/models.md` §1 |
 | 未识别字段进 `attrs JSON` 兜底 | 任一受支持 harness 升级新增 attribute 时无需立即迁移 |
 | Query API 推迟到 v2 | 没有前端需求时定义 API 容易过度设计 |
 | `TIMESTAMP` 微秒精度而非 `TIMESTAMP_NS` | 兼容外部 BI 工具；详见 `docs/models.md` §5.1 |
@@ -253,8 +253,8 @@ for _, row := range rows {
 | 背压策略：丢最旧 + 日志，不反压 harness | OTLP SDK 自身就会丢，监控不能阻塞本地 harness |
 | 各 harness 保留协议原生表族，查询层再统一 | 不把一个 harness 的身份、token 或事件语义强套到另一个；Claude 使用历史无前缀表，Codex 使用 `codex_*` 表（见 spec 2026-07-01） |
 | Codex `tool_result` 原文只存长度 | Codex 默认不脱敏且无客户端开关，敏感内容不落盘 |
-| Codex 接 6 个核心 Logs 事件及 Dashboard 所需的 Skill / service TBT Metrics | Skill 用 monotonic DELTA Sum；TBT 用 DELTA Histogram 且只保存 count/sum，不展开 bucket；其余高容量 metrics 与 sandbox / network_proxy 等事件无 Dashboard 需求 |
-| Codex/第三方成本由 `internal/pricing` 在 ingest 时按 LiteLLM 计价表**估算** `cost_usd`（v2.4.0，反转早期「不估算」非目标）；Claude 仍用自报权威成本 | Codex 不上报 cost；用外部计价表估算填补，默认关闭零影响，单价写入时冻结不回填（见 spec/plan 2026-07-02-third-party-cost-estimation） |
+| Codex 接 8 个 Logs 事件及 Skill / service TBT / Turn token Metrics | Skill 注入用 monotonic DELTA Sum；TBT / Turn token 用 DELTA Histogram，仅存 count/sum。会话 Skill 使用去重调用日志，全局排名保留注入 Metric，详见 docs/protocol.md §3 |
+| Codex 成本按全历史会话选择原生 turn_cost 或冻结本地估算；两种来源独立保存，Claude 仍用自报成本 | 有原生成本的会话只计已观测原生回合，覆盖未知；否则用 LiteLLM 本地估算。pricing.enabled 只控制新本地计价，既有值仍可见；归档保留去重/选源所需最小 ID（见 docs/protocol.md §3、docs/models.md §8） |
 
 ## Agent skills
 

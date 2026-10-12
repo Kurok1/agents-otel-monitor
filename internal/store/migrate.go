@@ -121,6 +121,13 @@ func loadAppliedVersions(db *sql.DB) (map[int]bool, error) {
 }
 
 func applyMigration(db *sql.DB, m Migration) error {
+	if strings.Contains(m.SQL, "archive.") {
+		var catalog string
+		if err := db.QueryRow(`SELECT current_database()`).Scan(&catalog); err != nil {
+			return fmt.Errorf("read migration catalog: %w", err)
+		}
+		m.SQL = strings.ReplaceAll(m.SQL, "archive.", quoteArchiveIdentifier(catalog)+".archive.")
+	}
 	for _, stmt := range splitStatements(m.SQL) {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("exec %q: %w", truncate(stmt, 80), err)

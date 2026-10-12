@@ -144,6 +144,10 @@ func mapCodexTokenUsage(row any) ([]driver.Value, error) {
 		nullInt64(r.DurationMs),
 		attrs,
 		nullFloat64(r.CostUsd),
+		nullInt64(r.TTFTMs),
+		nullInt64(r.CacheWriteTokenCount),
+		nullStr(r.Error),
+		r.ValidUsage(),
 	), nil
 }
 
@@ -203,5 +207,6 @@ func mapCodexToolResult(row any) ([]driver.Value, error) {
 		nullInt64(r.ArgumentsLength),
 		nullInt64(r.OutputLength),
 		attrs,
+		nullBool(r.OutputTruncated),
 	), nil
 }

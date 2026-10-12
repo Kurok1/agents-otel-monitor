@@ -346,7 +346,7 @@ func assertArchiveFixtureSummaries(t *testing.T, db *sql.DB, cutoff time.Time) {
 	if err := db.QueryRow(`SELECT tokens_total, request_count, tool_calls, skill_activations, cost_usd FROM archive.sessions WHERE client='codex' AND session_id='codex-cross'`).Scan(&tokens, &requests, &tools, &skills, &cost); err != nil {
 		t.Fatalf("query archived Codex session: %v", err)
 	}
-	if tokens != 280 || requests != 1 || tools != 1 || skills != 0 || math.Abs(cost-2.5) > 1e-12 {
+	if tokens != 280 || requests != 1 || tools != 1 || skills != 0 || cost != 0 {
 		t.Fatalf("archived Codex session = tokens=%d requests=%d tools=%d skills=%d cost=%g", tokens, requests, tools, skills, cost)
 	}
 }

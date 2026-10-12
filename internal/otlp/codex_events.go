@@ -111,6 +111,13 @@ func parseCodexTokenUsage(rec *lpb.LogRecord, resourceAttrs []*commonpb.KeyValue
 		ServiceTier:          m.takeString("service_tier"),
 		ModelReasoningEffort: m.takeString("model_reasoning_effort"),
 		DurationMs:           m.takeInt64("duration_ms"),
+		TTFTMs:               m.takeInt64("ttft_ms"),
+		CacheWriteTokenCount: m.takeInt64("cache_write_token_count"),
+		Error:                m.takeString("error.message"),
+	}
+	row.UsageValid = row.ValidUsage()
+	if row.TTFTMs.Valid && row.TTFTMs.Int64 < 0 {
+		row.TTFTMs = sql.NullInt64{}
 	}
 	row.Attrs = m.leftover()
 	return row, nil
@@ -152,6 +159,7 @@ func parseCodexToolResult(rec *lpb.LogRecord, resourceAttrs []*commonpb.KeyValue
 		MCPServerOrigin:  m.takeString("mcp_server_origin"),
 		ArgumentsLength:  takeLength(m, "arguments"), // privacy: length only, raw dropped
 		OutputLength:     takeLength(m, "output"),
+		OutputTruncated:  m.takeBool("output_truncated"),
 	}
 	row.Attrs = m.leftover()
 	return row, nil

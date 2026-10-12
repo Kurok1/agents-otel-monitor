@@ -7,7 +7,7 @@
 | Harness | 接收信号 | DuckDB 表族 |
 |---|---|---|
 | Claude Code | 8 Metrics + 11 Events | 19 张历史无前缀表（`metric_*` / `event_*`） |
-| OpenAI Codex CLI | 2 Metrics + 6 Events | 8 张 `codex_metric_*` / `codex_event_*` 表 |
+| OpenAI Codex CLI | 3 Metrics + 8 Events | 11 张 `codex_metric_*` / `codex_event_*` 表 |
 
 项目地址：[`github.com/Kurok1/agents-otel-monitor`](https://github.com/Kurok1/agents-otel-monitor)
 
@@ -29,7 +29,7 @@ Supported local harnesses
 [Dispatcher]  → 按 harness 协议及 metric.name / event.name 路由
         │
         ▼
-[27 typed rows] → [BufferedWriter] → 每张表独立 buffer + DuckDB Appender
+[30 typed rows] → [BufferedWriter] → 每张表独立 buffer + DuckDB Appender
         │            按 batch_size 或 flush_interval 触发
         ▼
    DuckDB 单文件
@@ -82,7 +82,7 @@ cp config.example.yaml config.yaml
 
 启动后会看到：
 ```
-buffered writer ready  tables=27
+buffered writer ready  tables=30
 stats server listening addr=127.0.0.1:9100 web_ui=true
 grpc server listening  addr=127.0.0.1:4317
 ```
@@ -169,19 +169,24 @@ export OTEL_LOGS_EXPORT_INTERVAL=5000
 
 #### 3.2 OpenAI Codex CLI
 
-Codex **不读取标准 OTEL 环境变量**，只认 `~/.codex/config.toml` 的 `[otel]` 段；其 Logs 导出默认关闭，需要显式配置：
+Codex 导出地址需在 `~/.codex/config.toml` 的 `[otel]` 段显式配置；Logs 与 Metrics 分别启用：
 
 ```toml
 [otel]
 environment = "prod"
 exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
 metrics_exporter = { otlp-grpc = { endpoint = "http://127.0.0.1:4317" } }
+
+[analytics]
+enabled = true  # Metrics 导出需要启用 analytics
 # log_user_prompt = true    # 可选：上报 prompt 原文（默认 "[REDACTED]"）
 ```
 
-Logs 落入 6 张 `codex_event_*` 表（会话 / API 请求 / token 用量 / prompt / 工具决策与结果）；Metrics 中的 Skill 注入和原生 TBT 分别落入 `codex_metric_skill_injected`、`codex_metric_response_tbt`。**必须同时配置 `exporter` 与 `metrics_exporter`**；后者只影响启用后的新会话，历史 Skill / TBT 无法回填。详见 `docs/protocol.md` §3 与 `docs/models.md` §7。
+启动 Codex 时设置 `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=DELTA`，避免累计 Metric 重复计数。Logs 落入 8 张 `codex_event_*` 表；3 个 Metrics 分别保存成功 Skill 注入、service TBT 和 Turn token 用量。新增字段基线为 Codex 0.162.1，旧版缺字段时保持未知。配置只影响之后的导出，历史未采集信号不能回填。
 
-注意：Codex 不上报成本（cost_usd），token 计数是子集式口径（cached ⊂ input、reasoning ⊂ output）。自 v2.4.0 起可选启用 `pricing`（默认关闭）按 LiteLLM 计价表在 ingest 时**估算** Codex 成本，落入 `codex_event_token_usage.cost_usd`——配置见 `config.example.yaml` 的 `pricing` 段。
+看板展示 TTFT 样本数/均值/P50/P95、缓存写入、会话显式/隐式 Skill，以及按模型分 token 类型的 Turn 用量核对。Codex 总量仍是 input + output，缓存读写和推理 token 不重复相加。
+
+成本优先使用同一会话已观测到的原生 `codex.turn_cost`，无原生值时用写入时冻结的本地估算；不混合补齐同一会话的缺失回合，覆盖率未知。两者均为估算。`pricing.enabled` 只控制新本地计价；关闭后仍展示原生值和已保存本地值，并标明来源。可在 `config.example.yaml` 配置缓存写入单价，缺省按输入单价计算。详见 [协议](docs/protocol.md#3-openai-codex-cli-遥测) 与 [存储](docs/models.md#7-openai-codex-cli-表族11-张)。
 
 ### 4. 查询
 
@@ -223,7 +228,7 @@ duckdb data/monitor.duckdb "
 # Codex token 用量（注意子集式口径：总量 = input + output，不加 cached）
 duckdb data/monitor.duckdb "
   SELECT model, SUM(input_token_count + output_token_count) AS tokens
-  FROM codex_event_token_usage
+  FROM codex_valid_token_usage
   WHERE ts >= now() - INTERVAL 1 DAY
   GROUP BY 1 ORDER BY 2 DESC;"
 ```
@@ -312,6 +317,7 @@ GET /api/usage/trends?range=day|week|month  各模型 Token 用量趋势
 GET /api/usage/rankings?since=7d|30d|all    工具 + Skill Top10 排名
 GET /api/usage/heatmap                      360 天用量热点图
 GET /api/usage/rates?range=day|week|month   生产速率：生成速度（tok/s）+ 吞吐率（tok/min），滑动窗口细粒度分桶
+GET /api/usage/codex/telemetry?range=day|week|month  Codex TTFT 与 Turn/response token 核对
 GET /api/usage/rates/realtime?client=codex  即时生成速度：最近 2 分钟与前一段 2 分钟的加权平均
 GET /api/pricing/models                     价目表：实际出现过的模型 × LiteLLM 单价（$/1M，需启用 pricing）
 GET /api/sessions?limit=                    会话列表（Claude session + Codex conversation 混排）
@@ -321,7 +327,7 @@ GET /internal/stats                         per-table buffer 计数
 GET /debug/pprof/*                          运行时 profile（enable_pprof: true 时）
 ```
 
-usage / rankings / sessions 端点均支持 `client=all|claude|codex`（缺省 `all`）按 harness family 过滤；`client` 是现有 API 的兼容参数名。工具排名在 `all` 下直接合并两家的原始工具名；Skill 排名将 Claude 的 `skill_activated` 与 Codex 成功的 `skill.injected` delta 相加。Codex 的 token 统计口径为子集式，合并总量 = input + output（不重复计 cached/reasoning）。生成速度：Claude 使用 output tokens / 请求耗时，Codex 使用 `1000 / 平均 service TBT(ms)`；两种口径不会合并成一个 all-harness KPI。成本：Claude 为 harness 自报的权威值；Codex 为可选估算值（启用 `pricing` 后），响应用 `cost_estimated` 标记，前端在 codex/all 视图标注「含估算」。
+usage / rankings / sessions 端点均支持 `client=all|claude|codex`（缺省 `all`）按 harness family 过滤；`client` 是现有 API 的兼容参数名。工具排名在 `all` 下直接合并两家的原始工具名；Skill 排名将 Claude 的 `skill_activated` 与 Codex 成功的 `skill.injected` delta 相加。Codex 的 token 统计口径为子集式，合并总量 = input + output（不重复计 cached/reasoning）。生成速度：Claude 使用 output tokens / 请求耗时，Codex 使用 `1000 / 平均 service TBT(ms)`；两种口径不会合并成一个 all-harness KPI。成本：Claude 为 harness 自报值；Codex 为原生或本地估算，按会话选择来源。`cost_available` 区分未知与零，`cost_source`、`native_turn_count` 和 `legacy_cost_included` 提供来源证据，本地参考估算独立展示。Skill 会话详情使用去重调用事件，与全局注入排名分开。
 
 [`docs/plan-v2-query-api.md`](docs/plan-v2-query-api.md) 保留最初 Claude-only v1 的设计背景；当前多 harness 查询口径以 [`docs/protocol.md`](docs/protocol.md)、[`docs/models.md`](docs/models.md) 与 `internal/dashboard/` 实现为准。响应统一带 `Cache-Control: private, max-age=30`，所有时间窗按 `dashboard.timezone`（默认 `Asia/Shanghai`）切分。
 

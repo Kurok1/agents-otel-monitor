@@ -96,6 +96,7 @@ func overridesToTable(m map[string]config.PriceOverride) priceTable {
 			InputCostPerToken:           o.InputCostPerToken,
 			OutputCostPerToken:          o.OutputCostPerToken,
 			CacheReadInputTokenCost:     o.CacheReadInputTokenCost,
+			CacheCreationInputTokenCost: o.CacheCreationInputTokenCost,
 			OutputCostPerReasoningToken: o.OutputCostPerReasoningToken,
 		}
 	}

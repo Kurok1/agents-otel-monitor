@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from 'react';
 import { Sessions } from '../api/sessions';
+import { costSourceLabel } from '../api/codex-telemetry';
 import type { SessionDetail } from '../api/sessions';
 import { DonutChart } from '../components/charts/DonutChart';
 import { TOOL_PALETTE, SKILL_PALETTE } from '../lib/palette';
@@ -42,9 +43,10 @@ export function SessionDetailView({ id, client, onBack }: Props) {
 
   useEffect(() => {
     let cancelled = false;
-    setD(null);
-    setErr(null);
-    Sessions.detail(id, client)
+    Promise.resolve().then(() => {
+      if (!cancelled) { setD(null); setErr(null); }
+      return Sessions.detail(id, client);
+    })
       .then(r => {
         if (!cancelled) setD(r);
       })
@@ -111,20 +113,22 @@ export function SessionDetailView({ id, client, onBack }: Props) {
           value={formatTokens(d.tokens)}
           sub={
             d.token_detail
-              ? `输入 ${formatTokens(d.token_detail.input)} · 输出 ${formatTokens(d.token_detail.output)} · 缓存 ${formatTokens(d.token_detail.cached)} · 推理 ${formatTokens(d.token_detail.reasoning)}`
+              ? `输入 ${formatTokens(d.token_detail.input)} · 输出 ${formatTokens(d.token_detail.output)} · 缓存 ${formatTokens(d.token_detail.cached)} · 缓存写入 ${formatTokens(d.token_detail.cache_write ?? 0)} · 推理 ${formatTokens(d.token_detail.reasoning)}`
               : undefined
           }
         />
         <Stat label="请求次数" value={d.requests.toLocaleString()} />
         <Stat label="工具调用" value={d.tool_calls.toLocaleString()} />
         {d.cost != null && (
-          <Stat label={`成本${d.cost_estimated ? '(含估算)' : ''}`} value={formatCurrency(d.cost)} />
+          <Stat label={`成本${d.cost_estimated ? '(含估算)' : ''}`} value={formatCurrency(d.cost)} sub={d.client === 'codex' ? costSourceLabel(d) : undefined} />
         )}
-        {d.client !== 'codex' && (
-          <Stat label="Skill 激活" value={d.skill_activations.toLocaleString()} />
+        {(
+          <Stat label={d.client === 'codex' ? 'Skill 调用（已观测）' : 'Skill 激活'} value={d.skill_activations.toLocaleString()} />
         )}
       </div>
 
+      {d.client === 'codex' && d.cost == null && <p className="card-sub">成本未知：尚未收到可用的原生估值或本地估价。</p>}
+      {d.client === 'codex' && d.local_estimate_usd != null && <p className="card-sub">本地估价参考：{formatCurrency(d.local_estimate_usd)}，不与原生估值相加。</p>}
       <div className="cols-2">
         <section className="card">
           <div className="card-head">
@@ -158,21 +162,21 @@ export function SessionDetailView({ id, client, onBack }: Props) {
           )}
         </section>
 
-        {d.client !== 'codex' && (
+        {(
         <section className="card">
           <div className="card-head">
             <div>
-              <h3>Skill 激活次数</h3>
-              <div className="card-sub">{d.skill_activations.toLocaleString()} 次累计</div>
+              <h3>{d.client === 'codex' ? 'Skill 调用次数' : 'Skill 激活次数'}</h3>
+              <div className="card-sub">{d.skill_activations.toLocaleString()} 次累计{d.client === 'codex' && ' · 已按 Turn 去重，调用不代表任务成功'}</div>
             </div>
           </div>
           {d.skills.length === 0 ? (
-            <div className="card-sub">本会话无 Skill 激活</div>
+            <div className="card-sub">{d.client === 'codex' ? '尚未收到本会话的 Skill 调用遥测' : '本会话无 Skill 激活'}</div>
           ) : (
             <div className="rank">
               <DonutChart
                 data={skillsForDonut}
-                centerLabel="次激活"
+                centerLabel={d.client === 'codex' ? '次调用' : '次激活'}
                 centerValue={d.skill_activations.toLocaleString()}
               />
               <div className="rank-list">
@@ -182,7 +186,7 @@ export function SessionDetailView({ id, client, onBack }: Props) {
                       className="rank-list__dot"
                       style={{ background: SKILL_PALETTE[i % SKILL_PALETTE.length] }}
                     />
-                    <span className="rank-list__name">{s.name}</span>
+                    <span className="rank-list__name">{s.name}{d.client === 'codex' && <small> · 显式 {s.explicit ?? 0} / 隐式 {s.implicit ?? 0}</small>}</span>
                     <span className="rank-list__count">{s.activations.toLocaleString()}</span>
                     <span className="rank-list__pct">
                       {formatPct(s.activations / (d.skill_activations || 1), 1)}
